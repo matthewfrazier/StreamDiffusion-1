@@ -31,8 +31,9 @@ extras = {}
 extras["xformers"] = deps_list("xformers")
 extras["torch"] = deps_list("torch", "accelerate")
 extras["tensorrt"] = deps_list("protobuf", "cuda-python", "onnx", "onnxruntime", "colored")
+extras["controlnet"] = ["opencv-python-headless"]
 
-extras["dev"] = extras["xformers"] + extras["torch"] + extras["tensorrt"]
+extras["dev"] = extras["xformers"] + extras["torch"] + extras["tensorrt"] + extras["controlnet"]
 
 install_requires = [
     deps["fire"],

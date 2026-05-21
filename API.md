@@ -2,6 +2,206 @@
 
 Base URL: `http://<host>:8384`
 
+## Quickstart
+
+```bash
+# Install dependencies (requires CUDA-capable GPU)
+pip install -e .
+
+# Set your Anthropic API key for prompt enhancement and title generation
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+
+# Start the server
+python app.py
+```
+
+The server starts on `http://127.0.0.1:8384`. For remote access, use Tailscale or an HTTPS reverse proxy.
+
+## Web UI
+
+### GET /
+Serves the full interactive web application — a single-page app with real-time image generation, model switching, preset chips, prompt enhancement, sources, ControlNet, and IP-Adapter controls. No build step; the HTML is served inline from the backend.
+
+Open `http://<host>:8384/` in a browser to use.
+
+### GET /embed/compose
+Serves a lightweight, self-contained compose widget designed for embedding in other applications via `<iframe>`. Includes scene selector, preset chips, active pills, `#` autocomplete, and enhance button. See [Embeddable Compose Component](#embeddable-compose-component) for the full postMessage protocol.
+
+```html
+<iframe src="http://<host>:8384/embed/compose?scene=music"
+        style="width:100%;height:400px;border:none"></iframe>
+```
+
+---
+
+## Scenes & Presets
+
+The API supports multiple creative scenes (image, music, sound), each with its own preset library and prompt enhancement behavior.
+
+### GET /presets
+Returns the preset library for a scene.
+
+**Query params:**
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `scene` | string | `"image"` | Scene type: `image`, `music`, `sound` |
+
+**Response:**
+```json
+{
+  "label": "Music Generation",
+  "categories": [
+    {
+      "name": "Genre",
+      "presets": [
+        {"label": "Ambient", "value": "ambient, atmospheric, ethereal pads, drone"},
+        {"label": "Electronic", "value": "electronic, synthesizer, sequenced, digital"}
+      ]
+    },
+    {"name": "Mood", "presets": [...]},
+    {"name": "Instrumentation", "presets": [...]},
+    {"name": "Tempo", "presets": [...]}
+  ]
+}
+```
+
+Available scenes:
+- `image` — Style, Composition, Lighting presets for SD 1.5
+- `music` — Genre, Mood, Instrumentation, Tempo presets for music generation
+- `sound` — Type, Character, Environment, Dynamics presets for sound design
+
+### Scene CRUD
+
+Full management of scene type definitions. Custom scenes integrate with `/presets`, `/enhance`, and the embed widget.
+
+**Scene key format:** lowercase alphanumeric with hyphens, 2-50 chars (`^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$`).
+
+**Scene schema:**
+```json
+{
+  "label": "My Custom Scene",
+  "categories": [
+    {
+      "name": "Category Name",
+      "presets": [
+        {"label": "Preset Label", "value": "comma-separated modifier tokens"}
+      ]
+    }
+  ]
+}
+```
+
+#### GET /scenes
+List all scenes with summary stats.
+
+**Response:**
+```json
+{
+  "image": {"label": "Image Generation", "category_count": 3, "preset_count": 27},
+  "music": {"label": "Music Generation", "category_count": 4, "preset_count": 33},
+  "sound": {"label": "Sound Design", "category_count": 4, "preset_count": 28}
+}
+```
+
+#### GET /scenes/{key}
+Get full scene definition.
+
+**Response:**
+```json
+{
+  "key": "music",
+  "label": "Music Generation",
+  "categories": [
+    {"name": "Genre", "presets": [{"label": "Ambient", "value": "ambient, atmospheric, ethereal pads, drone"}, ...]},
+    {"name": "Mood", "presets": [...]},
+    ...
+  ]
+}
+```
+
+Returns `404` if not found.
+
+#### PUT /scenes/{key}
+Create or replace a scene. Preset labels must be unique across all categories.
+
+**Request:** Scene schema (see above).
+
+**Response:** `200` (replaced) or `201` (created) with full scene definition.
+
+Returns `400` for invalid key or duplicate preset labels.
+
+#### PATCH /scenes/{key}
+Partial update. Supports these operations (any combination in one request):
+
+| Field | Type | Effect |
+|-------|------|--------|
+| `label` | string | Update display name |
+| `add_category` | `{name, presets}` | Add a new category |
+| `remove_category` | string | Remove category by name |
+| `add_presets` | `{category, presets}` | Append presets to a category (skips duplicates) |
+| `remove_presets` | `{category, labels}` | Remove presets by label from a category |
+
+**Example — add presets to an existing category:**
+```json
+{
+  "add_presets": {
+    "category": "Genre",
+    "presets": [
+      {"label": "Jazz", "value": "jazz, swing, improvisation, brass"}
+    ]
+  }
+}
+```
+
+**Response:** Full updated scene definition.
+
+Returns `404` if scene not found, `409` if adding a category that already exists.
+
+#### DELETE /scenes/{key}
+Delete a custom scene. Built-in scenes (image, music, sound) can also be deleted but will not persist across restarts.
+
+**Response:**
+```json
+{"status": "deleted", "key": "my-scene"}
+```
+
+Returns `404` if not found.
+
+### POST /enhance
+Rewrite a prompt using LLM enhancement, optimized per scene. Returns suggested preset chips.
+
+**Request:**
+```json
+{
+  "prompt": "a dark ambient track for a horror scene",
+  "scene": "music",
+  "context": {
+    "mood": "terrifying",
+    "environment": "abandoned hospital"
+  }
+}
+```
+- `prompt` (required): raw prompt text
+- `scene` (optional, default `"image"`): selects the enhancement strategy and modifier library
+- `context` (optional): structured key-value pairs folded into the prompt
+
+**Response:**
+```json
+{
+  "enhanced_prompt": "Dark ambient horror soundtrack, 60-80 BPM, minor key...",
+  "negative_prompt": "uplifting, major key, bright, distortion, clipping...",
+  "notes": "Added specific instrumentation and sonic descriptors...",
+  "original_prompt": "a dark ambient track for a horror scene",
+  "suggested_chips": ["Ambient", "Tense", "Synth Pads", "Slow / Adagio"]
+}
+```
+
+`suggested_chips` contains 0-4 preset labels from the scene's library. Clients should activate matching presets in the UI.
+
+Returns `400` for empty prompt, `500` if `ANTHROPIC_API_KEY` is not set.
+
+---
+
 ## Models
 
 ### GET /models
@@ -141,12 +341,15 @@ Remove the reference image.
 
 ## Sources
 
-Text sources that can be loaded into the prompt.
+Saved prompts with LLM-generated titles and associated presets.
 
 ### GET /sources
 List all sources.
 
-**Response:** `[{"id": "uuid", "url": "...", "label": "..."}]`
+**Response:**
+```json
+[{"id": "uuid", "url": "prompt text...", "label": "Crystalline Coyotes Dusk", "chips": ["Cinematic", "Dramatic"], "scene": "image"}]
+```
 
 ### POST /sources
 Add a new source.
@@ -167,14 +370,76 @@ Delete a source by ID.
 Returns `404` if not found.
 
 ### POST /sources/from-prompt
-Save the current prompt text as a source.
+Save a prompt with its active presets. Generates an LLM title automatically.
 
 **Request:**
 ```json
-{"prompt": "a beautiful sunset"}
+{
+  "prompt": "three coyotes with crystalline protrusions...",
+  "chips": ["Cinematic", "Dramatic"],
+  "scene": "image"
+}
 ```
 
-**Response:** `201` with `{"id": "uuid", "url": "a beautiful sunset", "label": "Saved prompt"}`
+**Response:** `201`
+```json
+{
+  "id": "uuid",
+  "url": "three coyotes with crystalline protrusions...",
+  "label": "Crystalline Coyotes Dusk",
+  "chips": ["Cinematic", "Dramatic"],
+  "scene": "image"
+}
+```
+
+---
+
+## Embeddable Compose Component
+
+### GET /embed/compose
+Returns a self-contained HTML5 compose widget that can be embedded via `<iframe>`. Includes the scene selector, preset chips, active pills, `#` autocomplete, and enhance button. Communicates with the host page via `postMessage`. No external dependencies — all CSS and JS are inlined.
+
+```html
+<iframe src="http://<host>:8384/embed/compose?scene=music"
+        style="width:100%;height:400px;border:none"></iframe>
+```
+
+**Query params:**
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `scene` | string | `"image"` | Initial scene |
+
+**postMessage events (iframe → parent):**
+| Event | Payload | Trigger |
+|-------|---------|---------|
+| `prompt` | `{type: "prompt", prompt, chips, scene}` | User clicks Generate |
+| `enhanced` | `{type: "enhanced", enhanced_prompt, negative_prompt, notes, suggested_chips}` | Enhance completes |
+
+**postMessage events (parent → iframe):**
+| Event | Payload | Effect |
+|-------|---------|--------|
+| `setScene` | `{type: "setScene", scene: "sound"}` | Switch active scene, reload presets |
+| `setPrompt` | `{type: "setPrompt", prompt: "...", chips: [...]}` | Load prompt text and activate matching chips |
+
+**Integration example:**
+```javascript
+const iframe = document.querySelector('iframe');
+
+// Listen for compose events
+window.addEventListener('message', (e) => {
+  if (e.data.type === 'prompt') {
+    // User composed a prompt — send to your generation backend
+    console.log(e.data.prompt, e.data.chips, e.data.scene);
+  }
+});
+
+// Load a saved prompt into the compose widget
+iframe.contentWindow.postMessage({
+  type: 'setPrompt',
+  prompt: 'ambient horror soundscape',
+  chips: ['Ambient', 'Tense']
+}, '*');
+```
 
 ---
 

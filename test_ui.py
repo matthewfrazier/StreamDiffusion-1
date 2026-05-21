@@ -150,7 +150,7 @@ class TestChipToggleMobile:
 
     def test_tap_on_then_off_zero_active_in_section(self, mobile_page):
         """Tap a chip on, tap it off, confirm zero chips active in its section."""
-        section_chips = mobile_page.locator("#styleChips .chip")
+        section_chips = mobile_page.locator(".chips .chip")
         chip = section_chips.first
         chip.tap()
         assert get_chip_active(chip)
@@ -163,7 +163,7 @@ class TestChipToggleMobile:
 
     def test_tap_second_chip_does_not_deactivate_first(self, mobile_page):
         """Tapping chip B must not change chip A's state."""
-        chips = mobile_page.locator("#styleChips .chip")
+        chips = mobile_page.locator(".chips .chip")
         chips.nth(0).tap()
         assert get_chip_active(chips.nth(0))
         chips.nth(1).tap()
@@ -172,7 +172,7 @@ class TestChipToggleMobile:
 
     def test_tap_sequence_activates_then_deactivates_each(self, mobile_page):
         """Activate 3 chips, deactivate each individually, confirm zero remain."""
-        chips = mobile_page.locator("#styleChips .chip")
+        chips = mobile_page.locator(".chips .chip")
         chips.nth(0).tap()
         chips.nth(1).tap()
         chips.nth(2).tap()
@@ -218,14 +218,14 @@ class TestChipToggleRealTouch:
         )
 
     def test_real_touch_toggle_on_off(self, mobile_page):
-        chip = mobile_page.locator("#styleChips .chip").first
+        chip = mobile_page.locator(".chips .chip").first
         self._real_tap(mobile_page, chip)
         assert get_chip_active(chip)
         self._real_tap(mobile_page, chip)
         assert not get_chip_active(chip)
 
     def test_real_touch_zero_active_after_off(self, mobile_page):
-        chips = mobile_page.locator("#styleChips .chip")
+        chips = mobile_page.locator(".chips .chip")
         self._real_tap(mobile_page, chips.first)
         assert get_chip_active(chips.first)
         self._real_tap(mobile_page, chips.first)
@@ -236,7 +236,7 @@ class TestChipToggleRealTouch:
         assert active_count == 0
 
     def test_real_touch_independent_chips(self, mobile_page):
-        chips = mobile_page.locator("#styleChips .chip")
+        chips = mobile_page.locator(".chips .chip")
         self._real_tap(mobile_page, chips.nth(0))
         self._real_tap(mobile_page, chips.nth(1))
         assert get_chip_active(chips.nth(0)), "chip 0 should stay active"
@@ -246,7 +246,7 @@ class TestChipToggleRealTouch:
         assert get_chip_active(chips.nth(1)), "chip 1 should stay active"
 
     def test_real_touch_deactivate_all_three(self, mobile_page):
-        chips = mobile_page.locator("#styleChips .chip")
+        chips = mobile_page.locator(".chips .chip")
         for i in range(3):
             self._real_tap(mobile_page, chips.nth(i))
         for i in range(3):
@@ -396,13 +396,15 @@ class TestSourcesCRUD:
     def test_save_prompt_as_source(self):
         resp = requests.post(
             f"{BASE_URL}/sources/from-prompt",
-            json={"prompt": "a beautiful sunset"},
-            timeout=10,
+            json={"prompt": "a beautiful sunset", "chips": ["Cinematic"]},
+            timeout=30,
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert data["label"] == "Saved prompt"
+        assert len(data["label"]) > 0
+        assert data["label"] != "Saved prompt"
         assert data["url"] == "a beautiful sunset"
+        assert data["chips"] == ["Cinematic"]
         assert "id" in data
         requests.delete(f"{BASE_URL}/sources/{data['id']}", timeout=10)
 
@@ -730,3 +732,484 @@ class TestInputValidation:
         )
         text = desktop_page.locator("sl-alert[variant='danger']").first.text_content()
         assert "1-1000" in text or "Prompt must be" in text
+
+
+class TestPromptEnhancement:
+    """Test the POST /enhance endpoint for prompt enhancement via Claude API."""
+
+    def test_enhance_returns_expected_fields(self):
+        """POST /enhance with a valid prompt returns enhanced_prompt, negative_prompt, notes."""
+        resp = requests.post(
+            f"{BASE_URL}/enhance",
+            json={"prompt": "a pack of three coyotes threatens the viewer"},
+            timeout=30,
+        )
+        assert resp.status_code == 200, f"Expected 200 but got {resp.status_code}: {resp.text}"
+        data = resp.json()
+        assert "enhanced_prompt" in data
+        assert "negative_prompt" in data
+        assert "notes" in data
+        assert "original_prompt" in data
+        assert len(data["enhanced_prompt"]) > 0
+        assert len(data["negative_prompt"]) > 0
+        assert len(data["notes"]) > 0
+        assert data["original_prompt"] == "a pack of three coyotes threatens the viewer"
+
+    def test_enhance_incorporates_context(self):
+        """Context fields should influence the enhanced prompt."""
+        resp = requests.post(
+            f"{BASE_URL}/enhance",
+            json={
+                "prompt": "a castle on a hill",
+                "context": {
+                    "mood": "menacing, eerie",
+                    "genre": "dark fantasy",
+                    "location": "mountain peak",
+                    "time_of_day": "twilight",
+                    "environment": "stormy, lightning",
+                    "camera": "low angle, wide",
+                    "medium": "digital painting",
+                },
+            },
+            timeout=30,
+        )
+        assert resp.status_code == 200, f"Expected 200 but got {resp.status_code}: {resp.text}"
+        data = resp.json()
+        enhanced = data["enhanced_prompt"].lower()
+        # The enhanced prompt should reflect at least some context fields
+        context_hits = 0
+        for term in ["dark", "fantasy", "twilight", "storm", "lightning", "low angle",
+                      "digital", "painting", "mountain", "menac", "eerie"]:
+            if term in enhanced:
+                context_hits += 1
+        assert context_hits >= 2, (
+            f"Expected at least 2 context terms in enhanced prompt, found {context_hits}. "
+            f"Prompt: {data['enhanced_prompt']}"
+        )
+
+    def test_enhance_empty_prompt_returns_400(self):
+        """An empty prompt should return HTTP 400."""
+        resp = requests.post(
+            f"{BASE_URL}/enhance",
+            json={"prompt": ""},
+            timeout=10,
+        )
+        assert resp.status_code == 400
+
+        resp2 = requests.post(
+            f"{BASE_URL}/enhance",
+            json={"prompt": "   "},
+            timeout=10,
+        )
+        assert resp2.status_code == 400
+
+    def test_enhance_then_generate_produces_image(self):
+        """Full flow: enhance a prompt, then use the result to generate a valid image."""
+        # Step 1: Enhance
+        enhance_resp = requests.post(
+            f"{BASE_URL}/enhance",
+            json={
+                "prompt": "a wolf howling at the moon",
+                "context": {"mood": "mysterious", "time_of_day": "night"},
+            },
+            timeout=30,
+        )
+        assert enhance_resp.status_code == 200, (
+            f"Enhance failed: {enhance_resp.status_code} {enhance_resp.text}"
+        )
+        enhanced_data = enhance_resp.json()
+        enhanced_prompt = enhanced_data["enhanced_prompt"]
+        negative_prompt = enhanced_data["negative_prompt"]
+
+        # Step 2: Generate with the enhanced prompt
+        gen_resp = requests.get(
+            f"{BASE_URL}/generate",
+            params={
+                "prompt": enhanced_prompt,
+                "negative_prompt": negative_prompt,
+                "seed": 42,
+                "guidance_scale": 1.0,
+            },
+            timeout=60,
+        )
+        assert gen_resp.status_code == 200, (
+            f"Generate failed: {gen_resp.status_code} {gen_resp.text}"
+        )
+        assert gen_resp.headers["content-type"] == "image/png"
+
+        # Verify it's a valid, non-trivial image
+        img = Image.open(io.BytesIO(gen_resp.content)).convert("RGB")
+        arr = np.array(img, dtype=np.float32)
+        assert arr.std() > 1.0, "Generated image appears blank"
+
+
+class TestComposeArea:
+    """Tests for the compose area: active pills, #autocomplete, chip↔pill sync."""
+
+    def test_active_pills_container_exists(self, desktop_page):
+        pills = desktop_page.locator("#activePills")
+        expect(pills).to_be_attached()
+        expect(pills).to_be_hidden()
+
+    def test_chip_toggle_creates_pill(self, desktop_page):
+        chip = desktop_page.locator(".chip").first
+        chip.click()
+        assert get_chip_active(chip)
+        pills = desktop_page.locator("#activePills .active-pill")
+        expect(pills).to_have_count(1)
+        label = chip.text_content().strip()
+        assert label in pills.first.text_content()
+
+    def test_pill_x_deactivates_chip(self, desktop_page):
+        chip = desktop_page.locator(".chip").first
+        chip.click()
+        assert get_chip_active(chip)
+        pills = desktop_page.locator("#activePills .active-pill")
+        expect(pills).to_have_count(1)
+        pills.first.locator(".pill-x").click()
+        assert not get_chip_active(chip)
+        expect(desktop_page.locator("#activePills .active-pill")).to_have_count(0)
+
+    def test_multiple_chips_create_multiple_pills(self, desktop_page):
+        chips = desktop_page.locator(".chip")
+        chips.nth(0).click()
+        chips.nth(1).click()
+        pills = desktop_page.locator("#activePills .active-pill")
+        expect(pills).to_have_count(2)
+        chips.nth(0).click()
+        expect(desktop_page.locator("#activePills .active-pill")).to_have_count(1)
+
+    def test_autocomplete_opens_on_hash(self, desktop_page):
+        prompt = desktop_page.locator("#prompt")
+        prompt.evaluate("el => el.value = ''")
+        prompt.focus()
+        prompt.evaluate("""el => {
+            const ta = el.shadowRoot.querySelector('textarea');
+            ta.value = '#photo';
+            ta.selectionStart = ta.selectionEnd = 6;
+            ta.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new CustomEvent('sl-input', {bubbles: true}));
+        }""")
+        ac_list = desktop_page.locator("#acList")
+        assert "open" in (ac_list.get_attribute("class") or "")
+        items = desktop_page.locator(".autocomplete-item")
+        assert items.count() >= 1
+        assert "Photorealistic" in items.first.text_content()
+
+    def test_autocomplete_select_activates_chip(self, desktop_page):
+        prompt = desktop_page.locator("#prompt")
+        prompt.evaluate("el => el.value = ''")
+        prompt.focus()
+        prompt.evaluate("""el => {
+            const ta = el.shadowRoot.querySelector('textarea');
+            ta.value = '#cine';
+            ta.selectionStart = ta.selectionEnd = 5;
+            ta.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new CustomEvent('sl-input', {bubbles: true}));
+        }""")
+        ac_list = desktop_page.locator("#acList")
+        assert "open" in (ac_list.get_attribute("class") or "")
+        desktop_page.locator(".autocomplete-item").first.click()
+        cinematic_chip = desktop_page.locator(".chip", has_text="Cinematic")
+        assert get_chip_active(cinematic_chip)
+        pills = desktop_page.locator("#activePills .active-pill")
+        assert any("Cinematic" in pills.nth(i).text_content() for i in range(pills.count()))
+        cinematic_chip.click()
+
+    def test_autocomplete_closes_on_escape(self, desktop_page):
+        prompt = desktop_page.locator("#prompt")
+        prompt.evaluate("el => el.value = ''")
+        prompt.focus()
+        prompt.evaluate("""el => {
+            const ta = el.shadowRoot.querySelector('textarea');
+            ta.value = '#gold';
+            ta.selectionStart = ta.selectionEnd = 5;
+            ta.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new CustomEvent('sl-input', {bubbles: true}));
+        }""")
+        ac_list = desktop_page.locator("#acList")
+        assert "open" in (ac_list.get_attribute("class") or "")
+        desktop_page.evaluate("""() => {
+            const el = document.getElementById('prompt');
+            el.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+        }""")
+        assert "open" not in (ac_list.get_attribute("class") or "")
+
+    def test_pills_empty_when_no_chips_active(self, desktop_page):
+        desktop_page.evaluate("document.querySelectorAll('.chip').forEach(c => c.dataset.active = 'false')")
+        desktop_page.evaluate("document.querySelector('.chip').click()")
+        desktop_page.evaluate("document.querySelector('.chip').click()")
+        pills = desktop_page.locator("#activePills .active-pill")
+        expect(pills).to_have_count(0)
+
+
+class TestComposeAreaMobile:
+    """Mobile touch-specific tests for compose area pills and autocomplete."""
+
+    def test_chip_tap_creates_pill(self, mobile_page):
+        chip = mobile_page.locator(".chip").first
+        chip.tap()
+        assert get_chip_active(chip)
+        pills = mobile_page.locator("#activePills .active-pill")
+        expect(pills).to_have_count(1)
+        label = chip.text_content().strip()
+        assert label in pills.first.text_content()
+        chip.tap()
+
+    def test_pill_x_tap_deactivates_chip(self, mobile_page):
+        chip = mobile_page.locator(".chip").first
+        chip.tap()
+        assert get_chip_active(chip)
+        pill_x = mobile_page.locator("#activePills .active-pill .pill-x").first
+        pill_x.tap()
+        assert not get_chip_active(chip)
+        expect(mobile_page.locator("#activePills .active-pill")).to_have_count(0)
+
+    def test_pill_touch_target_min_size(self, mobile_page):
+        chip = mobile_page.locator(".chip").first
+        chip.tap()
+        pill = mobile_page.locator("#activePills .active-pill").first
+        box = pill.bounding_box()
+        assert box["height"] >= 28, f"Pill height {box['height']}px is too small for touch"
+        pill_x = pill.locator(".pill-x")
+        x_box = pill_x.bounding_box()
+        assert x_box["width"] >= 24, f"Pill X width {x_box['width']}px is too small for touch"
+        assert x_box["height"] >= 24, f"Pill X height {x_box['height']}px is too small for touch"
+        chip.tap()
+
+    def test_autocomplete_item_touch_target(self, mobile_page):
+        prompt = mobile_page.locator("#prompt")
+        prompt.evaluate("el => el.value = ''")
+        prompt.tap()
+        prompt.evaluate("""el => {
+            const ta = el.shadowRoot.querySelector('textarea');
+            ta.value = '#photo';
+            ta.selectionStart = ta.selectionEnd = 6;
+            ta.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new CustomEvent('sl-input', {bubbles: true}));
+        }""")
+        ac_list = mobile_page.locator("#acList")
+        assert "open" in (ac_list.get_attribute("class") or "")
+        item = mobile_page.locator(".autocomplete-item").first
+        box = item.bounding_box()
+        assert box["height"] >= 40, f"Autocomplete item height {box['height']}px is too small for touch"
+        mobile_page.evaluate("""() => {
+            document.getElementById('acList').classList.remove('open');
+        }""")
+
+    def test_autocomplete_drops_below_on_mobile(self, mobile_page):
+        prompt = mobile_page.locator("#prompt")
+        prompt.evaluate("el => el.value = ''")
+        prompt.tap()
+        prompt.evaluate("""el => {
+            const ta = el.shadowRoot.querySelector('textarea');
+            ta.value = '#dram';
+            ta.selectionStart = ta.selectionEnd = 5;
+            ta.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new CustomEvent('sl-input', {bubbles: true}));
+        }""")
+        ac_list = mobile_page.locator("#acList")
+        assert "open" in (ac_list.get_attribute("class") or "")
+        ac_box = ac_list.bounding_box()
+        prompt_box = prompt.bounding_box()
+        assert ac_box["y"] >= prompt_box["y"], "Autocomplete should drop below textarea on mobile"
+        mobile_page.evaluate("""() => {
+            document.getElementById('acList').classList.remove('open');
+        }""")
+
+    def test_autocomplete_tap_select_activates_chip(self, mobile_page):
+        prompt = mobile_page.locator("#prompt")
+        prompt.evaluate("el => el.value = ''")
+        prompt.tap()
+        prompt.evaluate("""el => {
+            const ta = el.shadowRoot.querySelector('textarea');
+            ta.value = '#neon';
+            ta.selectionStart = ta.selectionEnd = 5;
+            ta.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new CustomEvent('sl-input', {bubbles: true}));
+        }""")
+        ac_list = mobile_page.locator("#acList")
+        assert "open" in (ac_list.get_attribute("class") or "")
+        mobile_page.locator(".autocomplete-item").first.tap()
+        neon_chip = mobile_page.locator(".chip", has_text="Neon")
+        assert get_chip_active(neon_chip)
+        pills = mobile_page.locator("#activePills .active-pill")
+        assert any("Neon" in pills.nth(i).text_content() for i in range(pills.count()))
+        mobile_page.evaluate("""() => {
+            document.querySelectorAll('.chip').forEach(c => c.dataset.active = 'false');
+            document.getElementById('activePills').innerHTML = '';
+        }""")
+
+    def test_multiple_pills_wrap_on_narrow_screen(self, mobile_page):
+        chips = mobile_page.locator(".chip")
+        for i in range(4):
+            chips.nth(i).tap()
+        pills = mobile_page.locator("#activePills .active-pill")
+        expect(pills).to_have_count(4)
+        container = mobile_page.locator("#activePills")
+        box = container.bounding_box()
+        assert box["width"] <= 420, "Pills container should fit mobile width"
+        for i in range(4):
+            chips.nth(i).tap()
+
+
+class TestSceneCRUD:
+    """Full CRUD lifecycle for scene types and presets."""
+
+    CUSTOM_SCENE = {
+        "label": "Video Production",
+        "categories": [
+            {"name": "Style", "presets": [
+                {"label": "Documentary", "value": "documentary, handheld, natural"},
+                {"label": "Music Video", "value": "music video, stylized, fast cuts"},
+            ]},
+            {"name": "Pacing", "presets": [
+                {"label": "Slow Motion", "value": "slow motion, 120fps, dreamy"},
+            ]},
+        ],
+    }
+
+    def test_list_scenes(self):
+        resp = requests.get(f"{BASE_URL}/scenes", timeout=10)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "image" in data
+        assert "music" in data
+        assert "sound" in data
+        assert data["image"]["category_count"] == 3
+        assert data["image"]["preset_count"] == 27
+
+    def test_get_scene(self):
+        resp = requests.get(f"{BASE_URL}/scenes/image", timeout=10)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["key"] == "image"
+        assert data["label"] == "Image Generation"
+        assert len(data["categories"]) == 3
+
+    def test_get_scene_not_found(self):
+        resp = requests.get(f"{BASE_URL}/scenes/nonexistent", timeout=10)
+        assert resp.status_code == 404
+
+    def test_put_create_scene(self):
+        resp = requests.put(
+            f"{BASE_URL}/scenes/test-video",
+            json=self.CUSTOM_SCENE, timeout=10,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["key"] == "test-video"
+        assert data["label"] == "Video Production"
+        assert len(data["categories"]) == 2
+        scenes = requests.get(f"{BASE_URL}/scenes", timeout=10).json()
+        assert "test-video" in scenes
+        requests.delete(f"{BASE_URL}/scenes/test-video", timeout=10)
+
+    def test_put_update_scene(self):
+        requests.put(f"{BASE_URL}/scenes/test-update", json=self.CUSTOM_SCENE, timeout=10)
+        updated = {
+            "label": "Updated Video",
+            "categories": [
+                {"name": "NewCat", "presets": [{"label": "NewPreset", "value": "new, value"}]},
+            ],
+        }
+        resp = requests.put(f"{BASE_URL}/scenes/test-update", json=updated, timeout=10)
+        assert resp.status_code == 200
+        assert resp.json()["label"] == "Updated Video"
+        requests.delete(f"{BASE_URL}/scenes/test-update", timeout=10)
+
+    def test_patch_add_category(self):
+        requests.put(f"{BASE_URL}/scenes/test-patch", json=self.CUSTOM_SCENE, timeout=10)
+        resp = requests.patch(
+            f"{BASE_URL}/scenes/test-patch",
+            json={"add_category": {"name": "Transition", "presets": [{"label": "Crossfade", "value": "crossfade, dissolve"}]}},
+            timeout=10,
+        )
+        assert resp.status_code == 200
+        cats = [c["name"] for c in resp.json()["categories"]]
+        assert "Transition" in cats
+        requests.delete(f"{BASE_URL}/scenes/test-patch", timeout=10)
+
+    def test_patch_remove_category(self):
+        requests.put(f"{BASE_URL}/scenes/test-patch2", json=self.CUSTOM_SCENE, timeout=10)
+        resp = requests.patch(
+            f"{BASE_URL}/scenes/test-patch2",
+            json={"remove_category": "Pacing"}, timeout=10,
+        )
+        cats = [c["name"] for c in resp.json()["categories"]]
+        assert "Pacing" not in cats
+        assert "Style" in cats
+        requests.delete(f"{BASE_URL}/scenes/test-patch2", timeout=10)
+
+    def test_patch_add_presets(self):
+        requests.put(f"{BASE_URL}/scenes/test-patch3", json=self.CUSTOM_SCENE, timeout=10)
+        resp = requests.patch(
+            f"{BASE_URL}/scenes/test-patch3",
+            json={"add_presets": {"category": "Style", "presets": [{"label": "Vlog", "value": "vlog, casual"}]}},
+            timeout=10,
+        )
+        style_cat = [c for c in resp.json()["categories"] if c["name"] == "Style"][0]
+        assert "Vlog" in [p["label"] for p in style_cat["presets"]]
+        requests.delete(f"{BASE_URL}/scenes/test-patch3", timeout=10)
+
+    def test_patch_remove_presets(self):
+        requests.put(f"{BASE_URL}/scenes/test-patch4", json=self.CUSTOM_SCENE, timeout=10)
+        resp = requests.patch(
+            f"{BASE_URL}/scenes/test-patch4",
+            json={"remove_presets": {"category": "Style", "labels": ["Documentary"]}},
+            timeout=10,
+        )
+        style_cat = [c for c in resp.json()["categories"] if c["name"] == "Style"][0]
+        labels = [p["label"] for p in style_cat["presets"]]
+        assert "Documentary" not in labels
+        assert "Music Video" in labels
+        requests.delete(f"{BASE_URL}/scenes/test-patch4", timeout=10)
+
+    def test_delete_scene(self):
+        requests.put(f"{BASE_URL}/scenes/test-del", json=self.CUSTOM_SCENE, timeout=10)
+        resp = requests.delete(f"{BASE_URL}/scenes/test-del", timeout=10)
+        assert resp.status_code == 200
+        assert requests.get(f"{BASE_URL}/scenes/test-del", timeout=10).status_code == 404
+
+    def test_delete_not_found(self):
+        assert requests.delete(f"{BASE_URL}/scenes/nonexistent", timeout=10).status_code == 404
+
+    def test_put_invalid_key(self):
+        resp = requests.put(f"{BASE_URL}/scenes/INVALID!", json=self.CUSTOM_SCENE, timeout=10)
+        assert resp.status_code == 400
+
+    def test_put_duplicate_preset_labels(self):
+        bad = {"label": "Bad", "categories": [
+            {"name": "Cat", "presets": [{"label": "Same", "value": "a"}, {"label": "Same", "value": "b"}]}
+        ]}
+        assert requests.put(f"{BASE_URL}/scenes/test-bad", json=bad, timeout=10).status_code == 400
+
+    def test_patch_duplicate_category(self):
+        requests.put(f"{BASE_URL}/scenes/test-dup", json=self.CUSTOM_SCENE, timeout=10)
+        resp = requests.patch(
+            f"{BASE_URL}/scenes/test-dup",
+            json={"add_category": {"name": "Style", "presets": [{"label": "X", "value": "x"}]}},
+            timeout=10,
+        )
+        assert resp.status_code == 409
+        requests.delete(f"{BASE_URL}/scenes/test-dup", timeout=10)
+
+    def test_presets_endpoint_serves_custom(self):
+        requests.put(f"{BASE_URL}/scenes/test-presets", json=self.CUSTOM_SCENE, timeout=10)
+        resp = requests.get(f"{BASE_URL}/presets?scene=test-presets", timeout=10)
+        assert resp.status_code == 200
+        assert resp.json()["label"] == "Video Production"
+        requests.delete(f"{BASE_URL}/scenes/test-presets", timeout=10)
+
+    def test_enhance_with_custom_scene(self):
+        requests.put(f"{BASE_URL}/scenes/test-enh", json=self.CUSTOM_SCENE, timeout=10)
+        resp = requests.post(
+            f"{BASE_URL}/enhance",
+            json={"prompt": "a cinematic drone shot over mountains", "scene": "test-enh"},
+            timeout=30,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "enhanced_prompt" in data
+        assert "suggested_chips" in data
+        requests.delete(f"{BASE_URL}/scenes/test-enh", timeout=10)
