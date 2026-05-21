@@ -168,12 +168,12 @@ Delete a custom scene. Built-in scenes (image, music, sound) can also be deleted
 Returns `404` if not found.
 
 #### POST /scenes/generate
-Generate a complete scene definition from freeform context using LLM. Accepts text descriptions, playlist names, track titles, mood boards — any creative context that describes a domain.
+Generate a scene from a flat list of labels. Send descriptive terms — moods, genres, textures, instruments, tempos, environments — and the LLM figures out what categories make sense and maps each label in.
 
 **Request:**
 ```json
 {
-  "context": "Lo-fi hip hop study beats: jazzy piano chords, vinyl crackle, mellow drums, rainy day vibes, late night coding sessions, coffee shop atmosphere",
+  "labels": ["jazzy piano", "vinyl crackle", "rainy day", "mellow drums", "coffee shop", "late night"],
   "key": "lofi-study",
   "save": true
 }
@@ -181,7 +181,7 @@ Generate a complete scene definition from freeform context using LLM. Accepts te
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `context` | string | yes | Freeform text (1-5000 chars): descriptions, titles, track lists, mood keywords |
+| `labels` | string[] | yes | Flat list of descriptive terms (at least 1) |
 | `key` | string | no | Override the LLM-suggested scene key |
 | `save` | bool | no | If `true`, immediately register the scene (available via `/presets`, `/enhance`, embed widget) |
 
@@ -203,18 +203,18 @@ Generate a complete scene definition from freeform context using LLM. Accepts te
     {
       "name": "Instrumentation",
       "presets": [
-        {"label": "Jazzy Keys", "value": "rhodes piano, jazz chords, seventh chords, mellow keys"},
-        {"label": "Vinyl Texture", "value": "vinyl crackle, tape hiss, analog warmth, lo-fi noise"}
+        {"label": "Jazzy Piano", "value": "rhodes piano, jazz chords, seventh chords, mellow keys"},
+        {"label": "Vinyl Crackle", "value": "vinyl crackle, tape hiss, analog warmth, lo-fi noise"},
+        {"label": "Mellow Drums", "value": "soft kick, brushed snare, lo-fi percussion, lazy groove"}
       ]
-    },
-    ...
+    }
   ]
 }
 ```
 
-The LLM produces 3-5 categories with 4-8 presets each. When `save: false` (default), the response is a preview — the client can inspect, modify, and then `PUT /scenes/{key}` to register it.
+Every input label is placed into exactly one category. The LLM infers 3-5 categories by semantic fit and expands each label into generation tokens. When `save: false` (default), the response is a preview the client can tweak before `PUT /scenes/{key}`.
 
-Returns `400` for empty context, `500` if `ANTHROPIC_API_KEY` is not set.
+Returns `422` for empty labels, `500` if `ANTHROPIC_API_KEY` is not set.
 
 ### POST /enhance
 Rewrite a prompt using LLM enhancement, optimized per scene. Returns suggested preset chips.

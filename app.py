@@ -476,21 +476,22 @@ async def delete_scene(scene_key: str = Path(...)):
 
 
 class GenerateSceneRequest(BaseModel):
-    context: str = Field(..., min_length=1, max_length=5000)
+    labels: List[str] = Field(..., min_items=1)
     key: Optional[str] = None
     save: bool = False
 
 
 GENERATE_SCENE_SYSTEM = """\
-You are an expert at designing creative preset libraries for AI generation tools.
-Given freeform context (playlist names, track titles, text descriptions, mood boards, etc.),
-produce a structured scene definition with categorized presets.
+You are an expert at organizing creative concepts for AI generation tools.
+You receive a flat list of labels — short descriptive terms like moods, genres, textures, instruments, styles, tempos, environments, etc.
+Your job is to figure out what categories make sense and place each label into the best-fit category.
 
 Rules:
-- Create 3-5 categories that organize the creative space (e.g., Genre, Mood, Texture, Tempo, Instrumentation).
-- Each category should have 4-8 presets.
-- Each preset has a short human-readable "label" (1-3 words) and a "value" (comma-separated generation tokens, 3-10 tokens).
-- Labels must be unique across ALL categories.
+- Infer 3-5 categories from the labels (e.g., Mood, Genre, Texture, Tempo, Instrumentation, Environment, Style).
+- Place every input label into exactly one category — do not drop any.
+- A label can only appear once. If it could fit multiple categories, pick the strongest semantic match.
+- For each label, generate a "value" field: comma-separated generation tokens (3-8 tokens) that expand the label into useful generation detail.
+- If a category ends up with only 1 label, merge it into the closest related category.
 - Also produce a "label" for the scene itself (2-5 words, title case).
 - Also produce a "key" — a lowercase kebab-case slug (2-50 chars, letters/digits/hyphens only).
 - Return ONLY valid JSON with keys: "key", "label", "categories"
@@ -510,13 +511,17 @@ async def generate_scene(req: GenerateSceneRequest):
     except ImportError:
         raise HTTPException(status_code=500, detail="anthropic package is not installed. Run: uv pip install anthropic")
 
+    labels = [l.strip() for l in req.labels if l.strip()]
+    if not labels:
+        raise HTTPException(status_code=400, detail="At least one non-empty label is required")
+
     try:
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=2048,
             system=GENERATE_SCENE_SYSTEM,
-            messages=[{"role": "user", "content": f"Build a scene preset library from this context:\n\n{req.context.strip()}"}],
+            messages=[{"role": "user", "content": f"Organize these labels into a scene:\n\n{json.dumps(labels)}"}],
         )
 
         response_text = message.content[0].text.strip()
