@@ -983,11 +983,6 @@ sl-details::part(content){padding:8px 12px}
     </div>
 
     <sl-card>
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-        <sl-select id="sceneSelect" size="small" value="image" style="width:130px" hoist>
-        </sl-select>
-        <span class="muted" id="sceneLabel">Image Generation</span>
-      </div>
       <div class="active-pills" id="activePills"></div>
       <div class="autocomplete-wrap">
         <div class="autocomplete-list" id="acList"></div>
@@ -1170,26 +1165,8 @@ async function loadPresets(scene) {
       outer.appendChild(details);
     });
     container.appendChild(outer);
-    document.getElementById('sceneLabel').textContent = data.label;
     syncPills();
   } catch(e) { console.error('Failed to load presets', e); }
-}
-
-async function loadScenes() {
-  try {
-    const resp = await fetch('/scenes');
-    if (!resp.ok) return;
-    const scenes = await resp.json();
-    const sel = document.getElementById('sceneSelect');
-    sel.innerHTML = '';
-    for (const [key, info] of Object.entries(scenes)) {
-      const opt = document.createElement('sl-option');
-      opt.value = key;
-      opt.textContent = info.label;
-      sel.appendChild(opt);
-    }
-    sel.value = currentScene;
-  } catch(e) { /* ignore */ }
 }
 
 let acItems = [];
@@ -1464,11 +1441,6 @@ document.getElementById('acList').addEventListener('click', (e) => {
 
 let modelLoading = false;
 let activeSourceId = null;
-document.getElementById('sceneSelect').addEventListener('sl-change', async (e) => {
-  await loadPresets(e.target.value);
-  document.getElementById('activePills').innerHTML = '';
-});
-
 document.getElementById('modelSelect').addEventListener('sl-change', async (e) => {
   const model = e.target.value;
   const badge = document.getElementById('modelStatus');
@@ -1632,10 +1604,6 @@ function renderSource(source) {
   const preview = source.url.length > 60 ? source.url.substring(0, 60) + '...' : source.url;
   label.innerHTML = `<strong>${source.label}</strong><br><span class="muted" style="font-size:var(--sl-font-size-x-small);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block">${preview}</span>`;
   label.addEventListener('click', async () => {
-    if (source.scene && source.scene !== currentScene) {
-      document.getElementById('sceneSelect').value = source.scene;
-      await loadPresets(source.scene);
-    }
     document.getElementById('prompt').value = source.url;
     document.querySelectorAll('.chip').forEach(c => c.dataset.active = 'false');
     if (source.chips && source.chips.length) {
@@ -1762,7 +1730,6 @@ document.getElementById('enhanceBtn').addEventListener('click', async () => {
 });
 
 window.addEventListener('DOMContentLoaded', async () => {
-  await loadScenes();
   await loadPresets('image');
   await loadSources();
   const p = new URLSearchParams(window.location.search);
