@@ -211,44 +211,20 @@ SCENE_PRESETS = {
     },
 }
 
-SCENE_ENHANCE_BASES = {
-    "image": """\
-You are a Stable Diffusion 1.5 prompt engineer. Rewrite natural language image descriptions into optimized SD 1.5 prompts.
+ENHANCE_PROMPTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "enhance_prompts.json")
 
-Rules:
-- Front-load the subject, then details (pose, expression, clothing), then environment, then style/quality tags.
-- Use emphasis weights like (element:1.3) for important visual elements. Use sparingly (2-4 weighted terms max).
-- Add quality boosters: masterpiece, best quality, highly detailed, sharp focus — but only if appropriate for the medium.
-- Keep the total prompt under 200 tokens.
-- Generate a matching negative prompt for common SD 1.5 failures (bad anatomy, blurry, watermark, etc.).
-- Incorporate ALL provided context fields naturally into the prompt.
-- The "notes" field should be 1-2 sentences explaining what you changed and why.
-""",
-    "music": """\
-You are a music generation prompt engineer. Rewrite natural language music descriptions into optimized prompts for AI music generation models (MusicGen, Stable Audio, Udio).
+def _load_enhance_bases():
+    try:
+        with open(ENHANCE_PROMPTS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
-Rules:
-- Front-load genre/style, then tempo and key, then instrumentation, then mood and dynamics.
-- Use precise musical terminology: BPM ranges, time signatures, key signatures, dynamics markings.
-- Add quality descriptors: professional mix, mastered, high fidelity, studio recording — where appropriate.
-- Keep the total prompt under 200 tokens.
-- Generate a matching negative prompt (distortion, clipping, off-key, low quality, noise, etc.).
-- Incorporate ALL provided context fields naturally into the prompt.
-- The "notes" field should be 1-2 sentences explaining what you changed and why.
-""",
-    "sound": """\
-You are a sound design prompt engineer for AI audio generation. Rewrite natural language sound descriptions into optimized prompts.
+def _save_enhance_bases(bases):
+    with open(ENHANCE_PROMPTS_FILE, "w") as f:
+        json.dump(bases, f, indent=2)
 
-Rules:
-- Front-load the sound type and source, then environment/space, then texture and character, then temporal dynamics.
-- Use precise audio terminology: frequency range, attack/decay/sustain/release, reverb characteristics, stereo width.
-- Add quality descriptors: high fidelity, clean recording, studio quality, 48kHz — where appropriate.
-- Keep the total prompt under 200 tokens.
-- Generate a matching negative prompt (noise, distortion, clipping, artifacts, low quality, etc.).
-- Incorporate ALL provided context fields naturally into the prompt.
-- The "notes" field should be 1-2 sentences explaining what you changed and why.
-""",
-}
+SCENE_ENHANCE_BASES = _load_enhance_bases()
 
 
 def build_enhance_prompt(scene):
@@ -473,6 +449,50 @@ async def delete_scene(scene_key: str = Path(...)):
         raise HTTPException(status_code=404, detail=f"Scene not found: {scene_key}")
     del SCENE_PRESETS[scene_key]
     return JSONResponse({"status": "deleted", "key": scene_key})
+
+
+@app.get("/enhance/config")
+async def get_enhance_config(scene: str = Query("image")):
+    if scene not in SCENE_ENHANCE_BASES:
+        raise HTTPException(status_code=404, detail=f"No enhance config for scene: {scene}")
+    return JSONResponse({"scene": scene, "system_prompt": SCENE_ENHANCE_BASES[scene]})
+
+
+@app.get("/enhance/configs")
+async def list_enhance_configs():
+    return JSONResponse({k: v[:100] + "..." for k, v in SCENE_ENHANCE_BASES.items()})
+
+
+@app.put("/enhance/config")
+async def put_enhance_config(body: dict):
+    scene = body.get("scene")
+    system_prompt = body.get("system_prompt")
+    if not scene or not isinstance(scene, str):
+        raise HTTPException(status_code=400, detail="scene is required")
+    if not system_prompt or not isinstance(system_prompt, str) or len(system_prompt.strip()) < 10:
+        raise HTTPException(status_code=400, detail="system_prompt is required (min 10 chars)")
+    SCENE_ENHANCE_BASES[scene] = system_prompt.strip()
+    _save_enhance_bases(SCENE_ENHANCE_BASES)
+    return JSONResponse({"scene": scene, "system_prompt": SCENE_ENHANCE_BASES[scene], "saved": True})
+
+
+@app.post("/enhance/config/reset")
+async def reset_enhance_config(body: dict = None):
+    scene = (body or {}).get("scene")
+    defaults = {
+        "image": "You are a Stable Diffusion 1.5 prompt engineer. Rewrite natural language image descriptions into optimized SD 1.5 prompts.\n\nRules:\n- Front-load the subject, then details (pose, expression, clothing), then environment, then style/quality tags.\n- Use emphasis weights like (element:1.3) for important visual elements. Use sparingly (2-4 weighted terms max).\n- Add quality boosters: masterpiece, best quality, highly detailed, sharp focus — but only if appropriate for the medium.\n- Keep the total prompt under 200 tokens.\n- Generate a matching negative prompt for common SD 1.5 failures (bad anatomy, blurry, watermark, etc.).\n- Incorporate ALL provided context fields naturally into the prompt.\n- The \"notes\" field should be 1-2 sentences explaining what you changed and why.",
+        "music": "You are a music generation prompt engineer. Rewrite natural language music descriptions into optimized prompts for AI music generation models (MusicGen, Stable Audio, Udio).\n\nRules:\n- Front-load genre/style, then tempo and key, then instrumentation, then mood and dynamics.\n- Use precise musical terminology: BPM ranges, time signatures, key signatures, dynamics markings.\n- Add quality descriptors: professional mix, mastered, high fidelity, studio recording — where appropriate.\n- Keep the total prompt under 200 tokens.\n- Generate a matching negative prompt (distortion, clipping, off-key, low quality, noise, etc.).\n- Incorporate ALL provided context fields naturally into the prompt.\n- The \"notes\" field should be 1-2 sentences explaining what you changed and why.",
+        "sound": "You are a sound design prompt engineer for AI audio generation. Rewrite natural language sound descriptions into optimized prompts.\n\nRules:\n- Front-load the sound type and source, then environment/space, then texture and character, then temporal dynamics.\n- Use precise audio terminology: frequency range, attack/decay/sustain/release, reverb characteristics, stereo width.\n- Add quality descriptors: high fidelity, clean recording, studio quality, 48kHz — where appropriate.\n- Keep the total prompt under 200 tokens.\n- Generate a matching negative prompt (noise, distortion, clipping, artifacts, low quality, etc.).\n- Incorporate ALL provided context fields naturally into the prompt.\n- The \"notes\" field should be 1-2 sentences explaining what you changed and why.",
+    }
+    if scene:
+        if scene not in defaults:
+            raise HTTPException(status_code=404, detail=f"No default for scene: {scene}")
+        SCENE_ENHANCE_BASES[scene] = defaults[scene]
+    else:
+        SCENE_ENHANCE_BASES.update(defaults)
+    _save_enhance_bases(SCENE_ENHANCE_BASES)
+    scenes_reset = [scene] if scene else list(defaults.keys())
+    return JSONResponse({"status": "reset", "scenes": scenes_reset})
 
 
 class GenerateSceneRequest(BaseModel):

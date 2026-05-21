@@ -216,6 +216,76 @@ Every input label is placed into exactly one category. The LLM infers 3-5 catego
 
 Returns `422` for empty labels, `500` if `ANTHROPIC_API_KEY` is not set.
 
+### Enhance Configuration
+
+The system prompts that drive `/enhance` are data-driven — stored in `enhance_prompts.json` and fully manageable via API. No source code changes needed to tune enhancement behavior.
+
+#### GET /enhance/configs
+List all configured scenes with prompt previews (first 100 chars).
+
+**Response:**
+```json
+{
+  "image": "You are a Stable Diffusion 1.5 prompt engineer. Rewrite natural language image descriptions into...",
+  "music": "You are a music generation prompt engineer. Rewrite natural language music descriptions into opt...",
+  "sound": "You are a sound design prompt engineer for AI audio generation. Rewrite natural language sound d..."
+}
+```
+
+#### GET /enhance/config
+Get the full system prompt for a scene.
+
+**Query params:**
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `scene` | string | `"image"` | Scene to retrieve |
+
+**Response:**
+```json
+{
+  "scene": "image",
+  "system_prompt": "You are a Stable Diffusion 1.5 prompt engineer..."
+}
+```
+
+Returns `404` if scene has no enhance config.
+
+#### PUT /enhance/config
+Update the system prompt for a scene. Persists to `enhance_prompts.json` and takes effect immediately.
+
+**Request:**
+```json
+{
+  "scene": "image",
+  "system_prompt": "You are a Stable Diffusion 1.5 prompt engineer...\n\nRules:\n- ..."
+}
+```
+
+**Response:**
+```json
+{
+  "scene": "image",
+  "system_prompt": "...",
+  "saved": true
+}
+```
+
+Returns `400` for missing or too-short system_prompt.
+
+#### POST /enhance/config/reset
+Reset system prompt(s) to built-in defaults.
+
+**Request:**
+```json
+{"scene": "image"}
+```
+Omit `scene` to reset all scenes.
+
+**Response:**
+```json
+{"status": "reset", "scenes": ["image"]}
+```
+
 ### POST /enhance
 Rewrite a prompt using LLM enhancement, optimized per scene. Returns suggested preset chips.
 

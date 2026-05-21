@@ -8,13 +8,16 @@ user_invocable: true
 
 You are tuning the StreamDiffusion enhancement pipeline. The user gives you a prompt (and optionally a reference image path or detailed scene description). Your job is to cycle through enhance → generate → evaluate → adjust until the generated image closely matches the user's intent.
 
-## Setup
+All configuration is data-driven — system prompts are stored in `enhance_prompts.json` and managed via API. No source code edits needed.
 
-The server runs at `http://localhost:8384`. Key files:
-- `app.py` lines ~214-259: `SCENE_ENHANCE_BASES["image"]` is the system prompt that drives `/enhance`
-- `app.py` line ~254: `build_enhance_prompt(scene)` assembles the full system prompt
+## API endpoints for enhance config
 
-For best visual quality, use DreamShaper 8 with guidance_scale=1.2 (CFG-capable model).
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET /enhance/config?scene=image` | Read the current system prompt for a scene |
+| `GET /enhance/configs` | List all scenes with prompt previews |
+| `PUT /enhance/config` | Update a scene's system prompt (persists to `enhance_prompts.json`) |
+| `POST /enhance/config/reset` | Reset one or all scenes to defaults |
 
 ## Workflow
 
@@ -27,15 +30,21 @@ Extract:
 
 ### 2. Ensure a CFG-capable model is active
 ```bash
-# Check current model
 curl -s http://localhost:8384/models | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['active'], d['loading'])"
-
-# If not dreamshaper-8, switch to it
+```
+If not `dreamshaper-8`, switch to it:
+```bash
 curl -s -X POST http://localhost:8384/load_model -H 'Content-Type: application/json' -d '{"model":"dreamshaper-8"}'
 ```
 Wait for loading to complete before generating.
 
-### 3. Run the enhance → generate loop
+### 3. Read the current enhance config
+```bash
+curl -s http://localhost:8384/enhance/config?scene=image | python3 -m json.tool
+```
+Note the current system prompt so you can make targeted adjustments.
+
+### 4. Run the enhance → generate loop
 
 Each iteration:
 
@@ -70,9 +79,21 @@ Score the output on:
 
 Report your evaluation to the user in 2-3 sentences.
 
-**e) If the output is not satisfactory, diagnose and adjust:**
+**e) If the output is not satisfactory, adjust the system prompt via API:**
 
-Common issues and fixes in `SCENE_ENHANCE_BASES["image"]`:
+First read the current prompt:
+```bash
+curl -s http://localhost:8384/enhance/config?scene=image
+```
+
+Then update it with your fix:
+```bash
+curl -s -X PUT http://localhost:8384/enhance/config \
+  -H 'Content-Type: application/json' \
+  -d '{"scene": "image", "system_prompt": "...updated prompt..."}'
+```
+
+Common issues and fixes:
 - **Enhancement drops key elements**: Add a rule like "Preserve ALL named subjects and their described attributes"
 - **Too many quality boosters dilute the subject**: Reduce the quality booster rule, or cap them
 - **Wrong emphasis weights**: Adjust the weight guidance (e.g., "Use (element:1.2-1.5) only for the primary subject")
@@ -80,15 +101,13 @@ Common issues and fixes in `SCENE_ENHANCE_BASES["image"]`:
 - **CLIP 77-token truncation**: The prompt is too long — add a rule to prioritize subject tokens and cut filler
 - **Style/mood mismatch**: Add style-specific rules or examples
 
-Edit `SCENE_ENHANCE_BASES["image"]` in `app.py` (around line 215) using the Edit tool. Then restart the evaluation by re-calling `/enhance` with the same prompt.
+Changes take effect immediately on the next `/enhance` call — no server restart needed.
 
-**You do NOT need to restart the server** — the system prompt is read from the dict at request time.
+### 5. Iterate
+Repeat steps 4a-4e, incrementing the iteration number. Typically 3-5 iterations are enough. After each adjustment, explain what you changed and why.
 
-### 4. Iterate
-Repeat steps 3a-3e, incrementing the iteration number. Typically 3-5 iterations are enough. After each edit, explain what you changed and why.
-
-### 5. Verify with different seeds
-Once satisfied, generate 2-3 images with different seeds to confirm the improvement is consistent, not seed-dependent:
+### 6. Verify with different seeds
+Once satisfied, generate 2-3 images with different seeds to confirm the improvement is consistent:
 ```bash
 for seed in 42 1337 9999; do
   curl -s -o /tmp/refine_verify_${seed}.png "http://localhost:8384/generate?prompt=...&guidance_scale=1.2&seed=${seed}"
@@ -96,16 +115,19 @@ done
 ```
 View each and confirm quality.
 
-### 6. Report
+### 7. Report
 Summarize:
 - What the original enhancement produced
-- What changes you made to the system prompt
+- What changes you made to the system prompt (via API, persisted to `enhance_prompts.json`)
 - What the final enhancement produces
 - Show the final image(s)
+
+To revert all changes: `curl -s -X POST http://localhost:8384/enhance/config/reset`
 
 ## Important notes
 - Always use the same seed within a comparison iteration so changes are attributable to prompt differences, not randomness
 - The CLIP tokenizer truncates at 77 tokens — if the enhanced prompt is long, front-loading matters enormously
 - DreamShaper 8 with guidance 1.2 and 3 steps is the quality benchmark model
 - If the user provides a reference image, read it first and describe what you see before starting the loop
-- Keep edits to `SCENE_ENHANCE_BASES` surgical — don't rewrite the whole prompt each time, change one rule and test
+- Keep edits surgical — don't rewrite the whole prompt each time, change one rule and test
+- All changes persist to `enhance_prompts.json` — use `/enhance/config/reset` to restore defaults
