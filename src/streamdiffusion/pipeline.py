@@ -12,6 +12,12 @@ from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img impo
 
 from streamdiffusion.image_filter import SimilarImageFilter
 
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
 
 class StreamDiffusion:
     def __init__(
@@ -75,6 +81,69 @@ class StreamDiffusion:
         self.vae = pipe.vae
 
         self.inference_time_ema = 0
+
+        self.controlnet = None
+        self.controlnet_scale = 1.0
+        self.control_image = None  # preprocessed control image tensor
+
+        self.ip_image_embeds = None
+        self.ip_adapter_scale = 0.6
+
+    def set_controlnet(self, controlnet, scale: float = 1.0) -> None:
+        """Set a ControlNet model to use during inference."""
+        self.controlnet = controlnet
+        self.controlnet_scale = scale
+
+    def clear_controlnet(self) -> None:
+        """Disable ControlNet."""
+        self.controlnet = None
+        self.control_image = None
+        self.controlnet_scale = 1.0
+
+    def set_controlnet_image(self, image: PIL.Image.Image) -> None:
+        """Preprocess a PIL image for ControlNet canny conditioning.
+
+        Steps:
+        1. Resize to (width, height)
+        2. Convert to grayscale
+        3. Run Canny edge detection (thresholds 100, 200)
+        4. Convert to 3-channel
+        5. Normalize to [0, 1]
+        6. Convert to tensor [1, 3, H, W] on device
+        """
+        if not HAS_CV2:
+            raise RuntimeError(
+                "opencv-python-headless is required for ControlNet canny preprocessing. "
+                "Install it with: pip install opencv-python-headless"
+            )
+
+        # Resize and convert to numpy
+        image = image.convert("RGB").resize((self.width, self.height))
+        img_np = np.array(image)
+
+        # Convert to grayscale and run Canny
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 100, 200)
+
+        # Convert to 3-channel
+        edges_3ch = np.stack([edges, edges, edges], axis=-1)  # [H, W, 3]
+
+        # Normalize to [0, 1] and convert to tensor
+        edges_tensor = torch.from_numpy(edges_3ch).float() / 255.0
+        edges_tensor = edges_tensor.permute(2, 0, 1).unsqueeze(0)  # [1, 3, H, W]
+        self.control_image = edges_tensor.to(device=self.device, dtype=self.dtype)
+
+    def clear_controlnet_image(self) -> None:
+        """Clear the control image."""
+        self.control_image = None
+
+    def set_ip_image_embeds(self, embeds: torch.Tensor, scale: float = 0.6) -> None:
+        self.ip_image_embeds = embeds.to(device=self.device, dtype=self.dtype)
+        self.ip_adapter_scale = scale
+        self.pipe.set_ip_adapter_scale(scale)
+
+    def clear_ip_image_embeds(self) -> None:
+        self.ip_image_embeds = None
 
     def load_lcm_lora(
         self,
@@ -167,17 +236,16 @@ class StreamDiffusion:
         )
         self.prompt_embeds = encoder_output[0].repeat(self.batch_size, 1, 1)
 
-        if self.use_denoising_batch and self.cfg_type == "full":
-            uncond_prompt_embeds = encoder_output[1].repeat(self.batch_size, 1, 1)
-        elif self.cfg_type == "initialize":
-            uncond_prompt_embeds = encoder_output[1].repeat(self.frame_bff_size, 1, 1)
+        if do_classifier_free_guidance:
+            if self.use_denoising_batch and self.cfg_type == "full":
+                uncond_prompt_embeds = encoder_output[1].repeat(self.batch_size, 1, 1)
+            elif self.cfg_type == "initialize":
+                uncond_prompt_embeds = encoder_output[1].repeat(self.frame_bff_size, 1, 1)
 
-        if self.guidance_scale > 1.0 and (
-            self.cfg_type == "initialize" or self.cfg_type == "full"
-        ):
-            self.prompt_embeds = torch.cat(
-                [uncond_prompt_embeds, self.prompt_embeds], dim=0
-            )
+            if self.cfg_type == "initialize" or self.cfg_type == "full":
+                self.prompt_embeds = torch.cat(
+                    [uncond_prompt_embeds, self.prompt_embeds], dim=0
+                )
 
         self.scheduler.set_timesteps(num_inference_steps, self.device)
         self.timesteps = self.scheduler.timesteps.to(self.device)
@@ -310,11 +378,39 @@ class StreamDiffusion:
         else:
             x_t_latent_plus_uc = x_t_latent
 
+        # Compute ControlNet residuals if active
+        controlnet_kwargs = {}
+        if self.controlnet is not None and self.control_image is not None:
+            batch_size = x_t_latent_plus_uc.shape[0]
+            # Expand control image to match the batch size
+            controlnet_cond = self.control_image.repeat(batch_size, 1, 1, 1)
+            down_block_res_samples, mid_block_res_sample = self.controlnet(
+                x_t_latent_plus_uc,
+                t_list,
+                encoder_hidden_states=self.prompt_embeds,
+                controlnet_cond=controlnet_cond,
+                conditioning_scale=self.controlnet_scale,
+                return_dict=False,
+            )
+            controlnet_kwargs["down_block_additional_residuals"] = down_block_res_samples
+            controlnet_kwargs["mid_block_additional_residual"] = mid_block_res_sample
+
+        ip_kwargs = {}
+        if getattr(self.unet.config, "encoder_hid_dim_type", None) == "ip_image_proj":
+            batch_size = x_t_latent_plus_uc.shape[0]
+            if self.ip_image_embeds is not None:
+                embeds = self.ip_image_embeds.repeat(batch_size, 1)
+            else:
+                embeds = torch.zeros((batch_size, 1024), device=self.device, dtype=self.dtype)
+            ip_kwargs["added_cond_kwargs"] = {"image_embeds": embeds}
+
         model_pred = self.unet(
             x_t_latent_plus_uc,
             t_list,
             encoder_hidden_states=self.prompt_embeds,
             return_dict=False,
+            **controlnet_kwargs,
+            **ip_kwargs,
         )[0]
 
         if self.guidance_scale > 1.0 and (self.cfg_type == "initialize"):
@@ -484,11 +580,37 @@ class StreamDiffusion:
             device=self.device,
             dtype=self.dtype,
         )
+
+        # Compute ControlNet residuals if active
+        controlnet_kwargs = {}
+        if self.controlnet is not None and self.control_image is not None:
+            controlnet_cond = self.control_image.repeat(batch_size, 1, 1, 1)
+            down_block_res_samples, mid_block_res_sample = self.controlnet(
+                x_t_latent,
+                self.sub_timesteps_tensor,
+                encoder_hidden_states=self.prompt_embeds,
+                controlnet_cond=controlnet_cond,
+                conditioning_scale=self.controlnet_scale,
+                return_dict=False,
+            )
+            controlnet_kwargs["down_block_additional_residuals"] = down_block_res_samples
+            controlnet_kwargs["mid_block_additional_residual"] = mid_block_res_sample
+
+        ip_kwargs = {}
+        if getattr(self.unet.config, "encoder_hid_dim_type", None) == "ip_image_proj":
+            if self.ip_image_embeds is not None:
+                embeds = self.ip_image_embeds.repeat(batch_size, 1)
+            else:
+                embeds = torch.zeros((batch_size, 1024), device=self.device, dtype=self.dtype)
+            ip_kwargs["added_cond_kwargs"] = {"image_embeds": embeds}
+
         model_pred = self.unet(
             x_t_latent,
             self.sub_timesteps_tensor,
             encoder_hidden_states=self.prompt_embeds,
             return_dict=False,
+            **controlnet_kwargs,
+            **ip_kwargs,
         )[0]
         x_0_pred_out = (
             x_t_latent - self.beta_prod_t_sqrt * model_pred

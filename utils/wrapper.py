@@ -6,8 +6,9 @@ from typing import List, Literal, Optional, Union, Dict
 
 import numpy as np
 import torch
-from diffusers import AutoencoderTiny, StableDiffusionPipeline
+from diffusers import AutoencoderTiny, ControlNetModel, StableDiffusionPipeline
 from PIL import Image
+from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
 
 from streamdiffusion import StreamDiffusion
 from streamdiffusion.image_utils import postprocess_image
@@ -28,6 +29,8 @@ class StreamDiffusionWrapper:
         output_type: Literal["pil", "pt", "np", "latent"] = "pil",
         lcm_lora_id: Optional[str] = None,
         vae_id: Optional[str] = None,
+        controlnet_id: Optional[str] = None,
+        ip_adapter_path: Optional[str] = None,
         device: Literal["cpu", "cuda"] = "cuda",
         dtype: torch.dtype = torch.float16,
         frame_buffer_size: int = 1,
@@ -73,6 +76,9 @@ class StreamDiffusionWrapper:
             The vae_id to load, by default None.
             If None, the default TinyVAE
             ("madebyollin/taesd") will be used.
+        controlnet_id : Optional[str], optional
+            The ControlNet model id to load, by default None.
+            Example: "lllyasviel/control_v11p_sd15_canny"
         device : Literal["cpu", "cuda"], optional
             The device to use for inference, by default "cuda".
         dtype : torch.dtype, optional
@@ -108,7 +114,7 @@ class StreamDiffusionWrapper:
         cfg_type : Literal["none", "full", "self", "initialize"],
         optional
             The cfg_type for img2img mode, by default "self".
-            You cannot use anything other than "none" for txt2img mode.
+            For txt2img mode, only "none" and "full" are supported.
         seed : int, optional
             The seed, by default 2.
         use_safety_checker : bool, optional
@@ -117,9 +123,9 @@ class StreamDiffusionWrapper:
         self.sd_turbo = "turbo" in model_id_or_path
 
         if mode == "txt2img":
-            if cfg_type != "none":
+            if cfg_type not in ("none", "full"):
                 raise ValueError(
-                    f"txt2img mode accepts only cfg_type = 'none', but got {cfg_type}"
+                    f"txt2img mode accepts cfg_type 'none' or 'full', but got {cfg_type}"
                 )
             if use_denoising_batch and frame_buffer_size > 1:
                 if not self.sd_turbo:
@@ -154,6 +160,8 @@ class StreamDiffusionWrapper:
             lora_dict=lora_dict,
             lcm_lora_id=lcm_lora_id,
             vae_id=vae_id,
+            controlnet_id=controlnet_id,
+            ip_adapter_path=ip_adapter_path,
             t_index_list=t_index_list,
             acceleration=acceleration,
             warmup=warmup,
@@ -164,6 +172,15 @@ class StreamDiffusionWrapper:
             seed=seed,
             engine_dir=engine_dir,
         )
+
+        self.clip_image_encoder = None
+        self.clip_image_processor = None
+        if ip_adapter_path is not None and hasattr(self.stream.pipe.unet, 'encoder_hid_proj') and self.stream.pipe.unet.encoder_hid_proj is not None:
+            enc_path = os.path.join(ip_adapter_path, "models", "image_encoder")
+            self.clip_image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+                enc_path
+            ).to(device=self.device, dtype=self.dtype)
+            self.clip_image_processor = CLIPImageProcessor.from_pretrained(enc_path)
 
         if device_ids is not None:
             self.stream.unet = torch.nn.DataParallel(
@@ -303,6 +320,14 @@ class StreamDiffusionWrapper:
 
         return image
 
+    def encode_ip_image(self, image: Image.Image) -> torch.Tensor:
+        if self.clip_image_encoder is None:
+            raise RuntimeError("IP-Adapter not loaded")
+        clip_input = self.clip_image_processor(images=image, return_tensors="pt").pixel_values
+        clip_input = clip_input.to(device=self.device, dtype=self.dtype)
+        image_embeds = self.clip_image_encoder(clip_input).image_embeds
+        return image_embeds
+
     def preprocess_image(self, image: Union[str, Image.Image]) -> torch.Tensor:
         """
         Preprocesses the image.
@@ -347,6 +372,72 @@ class StreamDiffusionWrapper:
         else:
             return postprocess_image(image_tensor.cpu(), output_type=output_type)[0]
 
+    def _load_ip_adapter_manual(self, pipe, ip_adapter_path):
+        from diffusers.models.attention_processor import IPAdapterAttnProcessor2_0
+        weight_file = os.path.join(ip_adapter_path, "models", "ip-adapter_sd15.bin")
+        sd = torch.load(weight_file, map_location="cpu")
+
+        cross_attention_dim = pipe.unet.config.cross_attention_dim
+        proj_sd = sd["image_proj"]
+        num_tokens = proj_sd["proj.weight"].shape[0] // cross_attention_dim
+
+        # Build ImageProjection module
+        clip_embed_dim = proj_sd["proj.weight"].shape[1]
+        proj = torch.nn.Linear(clip_embed_dim, cross_attention_dim * num_tokens)
+        norm = torch.nn.LayerNorm(cross_attention_dim)
+        proj.load_state_dict({"weight": proj_sd["proj.weight"], "bias": proj_sd["proj.bias"]})
+        norm.load_state_dict({"weight": proj_sd["norm.weight"], "bias": proj_sd["norm.bias"]})
+
+        class IPImageProjection(torch.nn.Module):
+            def __init__(self, proj, norm, num_tokens, dim):
+                super().__init__()
+                self.proj = proj
+                self.norm = norm
+                self.num_tokens = num_tokens
+                self.dim = dim
+            def forward(self, image_embeds):
+                x = self.proj(image_embeds)
+                x = x.reshape(-1, self.num_tokens, self.dim)
+                x = self.norm(x)
+                return x
+
+        pipe.unet.encoder_hid_proj = IPImageProjection(proj, norm, num_tokens, cross_attention_dim)
+        pipe.unet.encoder_hid_proj.to(device=self.device, dtype=self.dtype)
+        pipe.unet.config.encoder_hid_dim_type = "ip_image_proj"
+
+        # Group ip_adapter weights by processor index
+        ip_sd = sd["ip_adapter"]
+        proc_weights = {}
+        for key, value in ip_sd.items():
+            idx_str, param_name = key.split(".", 1)
+            idx = int(idx_str)
+            if idx not in proc_weights:
+                proc_weights[idx] = {}
+            proc_weights[idx][param_name] = value
+
+        # Build attention processors, matching cross-attn layers by order
+        attn2_names = [n for n in pipe.unet.attn_processors.keys() if not n.endswith("attn1.processor")]
+        attn_procs = {}
+        ip_idx = 0
+        for name in pipe.unet.attn_processors.keys():
+            if name.endswith("attn1.processor"):
+                attn_procs[name] = pipe.unet.attn_processors[name]
+                continue
+            weights = proc_weights.get(ip_idx, {})
+            hidden_size = weights["to_k_ip.weight"].shape[0] if "to_k_ip.weight" in weights else 320
+            proc = IPAdapterAttnProcessor2_0(
+                hidden_size=hidden_size,
+                cross_attention_dim=cross_attention_dim,
+                num_tokens=num_tokens,
+            ).to(device=self.device, dtype=self.dtype)
+            if weights:
+                proc.load_state_dict({k: v.to(device=self.device, dtype=self.dtype) for k, v in weights.items()})
+            attn_procs[name] = proc
+            ip_idx += 1
+
+        pipe.unet.set_attn_processor(attn_procs)
+        print(f"IP-Adapter loaded (manual, {ip_idx} cross-attn layers, {num_tokens} tokens)")
+
     def _load_model(
         self,
         model_id_or_path: str,
@@ -354,6 +445,8 @@ class StreamDiffusionWrapper:
         lora_dict: Optional[Dict[str, float]] = None,
         lcm_lora_id: Optional[str] = None,
         vae_id: Optional[str] = None,
+        controlnet_id: Optional[str] = None,
+        ip_adapter_path: Optional[str] = None,
         acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt",
         warmup: int = 10,
         do_add_noise: bool = True,
@@ -389,6 +482,8 @@ class StreamDiffusionWrapper:
             The lcm_lora_id to load, by default None.
         vae_id : Optional[str], optional
             The vae_id to load, by default None.
+        controlnet_id : Optional[str], optional
+            The ControlNet model id to load, by default None.
         acceleration : Literal["none", "xfomers", "sfast", "tensorrt"], optional
             The acceleration method, by default "tensorrt".
         warmup : int, optional
@@ -403,7 +498,7 @@ class StreamDiffusionWrapper:
         cfg_type : Literal["none", "full", "self", "initialize"],
         optional
             The cfg_type for img2img mode, by default "self".
-            You cannot use anything other than "none" for txt2img mode.
+            For txt2img mode, only "none" and "full" are supported.
         seed : int, optional
             The seed, by default 2.
 
@@ -426,6 +521,11 @@ class StreamDiffusionWrapper:
             traceback.print_exc()
             print("Model load has failed. Doesn't exist.")
             exit()
+
+        if ip_adapter_path is not None and pipe.unet.config.cross_attention_dim == 768:
+            self._load_ip_adapter_manual(pipe, ip_adapter_path)
+        elif ip_adapter_path is not None:
+            print(f"IP-Adapter skipped: incompatible cross_attention_dim={pipe.unet.config.cross_attention_dim} (needs 768)")
 
         stream = StreamDiffusion(
             pipe=pipe,
@@ -453,6 +553,14 @@ class StreamDiffusionWrapper:
                     stream.load_lora(lora_name)
                     stream.fuse_lora(lora_scale=lora_scale)
                     print(f"Use LoRA: {lora_name} in weights {lora_scale}")
+
+        if controlnet_id is not None:
+            print(f"Loading ControlNet: {controlnet_id}")
+            controlnet = ControlNetModel.from_pretrained(
+                controlnet_id, torch_dtype=self.dtype
+            ).to(device=self.device)
+            stream.set_controlnet(controlnet)
+            print(f"ControlNet loaded: {controlnet_id}")
 
         if use_tiny_vae:
             if vae_id is not None:
