@@ -319,6 +319,74 @@ Rewrite a prompt using LLM enhancement, optimized per scene. Returns suggested p
 
 Returns `400` for empty prompt, `500` if `ANTHROPIC_API_KEY` is not set.
 
+### Prompt Assessment
+
+Objective evaluation of how well a generated image matches its prompt. Decomposes the prompt into a checklist of visually verifiable concepts, then scores each one against the image. Foundation for agentic refinement loops.
+
+#### POST /assess/checklist
+Extract the visual checklist from a prompt — every entity, attribute, spatial relationship, style cue, etc. that should be verifiable in the output image.
+
+**Request:**
+```json
+{"prompt": "three coyotes with crystalline protrusions, dark atmospheric setting, chiaroscuro lighting"}
+```
+
+**Response:**
+```json
+{
+  "prompt": "three coyotes with crystalline protrusions...",
+  "checklist": [
+    "three coyotes (count: 3)",
+    "crystalline protrusions on haunches",
+    "dark atmospheric setting",
+    "chiaroscuro lighting (high contrast light/shadow)",
+    "close-up / tight framing"
+  ]
+}
+```
+
+Use this endpoint to preview and curate the checklist before running a full assessment. The checklist can be passed to `POST /assess` to skip re-extraction.
+
+#### POST /assess
+Score a generated image against its prompt. Accepts the image as a file upload and optionally a pre-built checklist.
+
+**Request:** `multipart/form-data`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `file` | file | yes | The generated image (PNG/JPEG) |
+| `prompt` | string | yes | The original generation prompt |
+| `checklist` | string | no | JSON array of concept strings (from `/assess/checklist`). If omitted, the checklist is inferred from the prompt. |
+
+**Response:**
+```json
+{
+  "prompt": "three coyotes with crystalline protrusions...",
+  "checklist": ["three coyotes (count: 3)", "crystalline protrusions on haunches", ...],
+  "scores": [
+    {"concept": "three coyotes (count: 3)", "score": 0.7, "verdict": "Two visible, third partially obscured"},
+    {"concept": "crystalline protrusions on haunches", "score": 0.9, "verdict": "Clear crystalline growths on both visible coyotes"},
+    {"concept": "dark atmospheric setting", "score": 1.0, "verdict": "Dark moody background, well executed"},
+    {"concept": "chiaroscuro lighting", "score": 0.8, "verdict": "Strong contrast but slightly flat in shadows"}
+  ],
+  "overall_score": 0.85
+}
+```
+
+Each score is 0.0 (absent) to 1.0 (perfectly represented). `overall_score` is the mean across all concepts.
+
+**Agentic refinement loop pattern:**
+```
+1. POST /enhance → get enhanced prompt
+2. GET /generate → produce image
+3. POST /assess → score image against original prompt
+4. If overall_score < threshold:
+   a. Analyze low-scoring concepts
+   b. PUT /enhance/config → adjust system prompt rules
+   c. Go to step 1
+5. Budget check: stop after N iterations
+```
+
 ---
 
 ## Models

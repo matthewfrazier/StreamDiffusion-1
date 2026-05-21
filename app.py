@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import torch
-from fastapi import FastAPI, File, HTTPException, Path, Query, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Path, Query, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from PIL import Image
 from pydantic import BaseModel, Field, validator
@@ -903,6 +903,161 @@ async def enhance_prompt(req: EnhanceRequest):
         if isinstance(e, HTTPException):
             raise
         raise HTTPException(status_code=500, detail=f"Enhancement failed: {str(e)}")
+
+
+ASSESS_CHECKLIST_SYSTEM = """\
+You are a visual prompt analyst. Given an image generation prompt, extract every visually verifiable concept.
+
+Rules:
+- List every distinct entity, attribute, spatial relationship, lighting cue, color, mood, composition element, and style descriptor.
+- Each item should be a single, atomic, visually checkable concept (e.g., "three coyotes" not "coyotes with crystalline protrusions").
+- Decompose compound descriptions: "three coyotes with crystalline protrusions along haunches" becomes separate items for count, subject, and the specific attribute.
+- Include implicit expectations (if the prompt says "close-up" there should be a "tight framing / close-up composition" item).
+- Order by visual importance: subject first, then attributes, then environment, then style.
+- Return ONLY valid JSON: an array of strings, each a short concept (3-10 words).
+- Do NOT wrap in markdown code fences. Return raw JSON only.
+"""
+
+ASSESS_IMAGE_SYSTEM = """\
+You are a visual quality assessor. You receive an image and a checklist of visual concepts that should be present.
+
+For each concept, evaluate how well it is represented in the image.
+
+Rules:
+- Score each concept from 0.0 (completely absent) to 1.0 (perfectly represented).
+- Provide a verdict of 10 words or less for each concept.
+- Be objective and precise. Partial presence gets partial scores (e.g., "two of three coyotes visible" = 0.7).
+- Return ONLY valid JSON: an array of objects with keys: "concept", "score", "verdict"
+- Do NOT wrap in markdown code fences. Return raw JSON only.
+"""
+
+
+@app.post("/assess/checklist")
+async def assess_checklist(body: dict):
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY environment variable is not set")
+
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(status_code=500, detail="anthropic package is not installed")
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=ASSESS_CHECKLIST_SYSTEM,
+            messages=[{"role": "user", "content": f"Extract the visual checklist from this prompt:\n\n\"{prompt}\""}],
+        )
+        response_text = message.content[0].text.strip()
+        try:
+            checklist = json.loads(response_text)
+        except json.JSONDecodeError:
+            import re
+            json_match = re.search(r'\[[\s\S]*\]', response_text)
+            if json_match:
+                checklist = json.loads(json_match.group())
+            else:
+                raise HTTPException(status_code=500, detail="Failed to parse checklist response")
+
+        return JSONResponse({"prompt": prompt, "checklist": checklist})
+
+    except anthropic.APIError as e:
+        raise HTTPException(status_code=502, detail=f"Anthropic API error: {str(e)}")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Checklist generation failed: {str(e)}")
+
+
+@app.post("/assess")
+async def assess_image(file: UploadFile = File(...), prompt: str = Form(...), checklist: str = Form(None)):
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY environment variable is not set")
+
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(status_code=500, detail="anthropic package is not installed")
+
+    image_data = await file.read()
+    import base64
+    image_b64 = base64.b64encode(image_data).decode("utf-8")
+    content_type = file.content_type or "image/png"
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    if checklist:
+        try:
+            checklist_items = json.loads(checklist)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="checklist must be valid JSON array of strings")
+    else:
+        cl_msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=ASSESS_CHECKLIST_SYSTEM,
+            messages=[{"role": "user", "content": f"Extract the visual checklist from this prompt:\n\n\"{prompt.strip()}\""}],
+        )
+        cl_text = cl_msg.content[0].text.strip()
+        try:
+            checklist_items = json.loads(cl_text)
+        except json.JSONDecodeError:
+            import re
+            json_match = re.search(r'\[[\s\S]*\]', cl_text)
+            checklist_items = json.loads(json_match.group()) if json_match else []
+
+    try:
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2048,
+            system=ASSESS_IMAGE_SYSTEM,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": content_type, "data": image_b64}},
+                    {"type": "text", "text": f"Assess this image against the following checklist:\n\n{json.dumps(checklist_items)}"},
+                ],
+            }],
+        )
+        response_text = message.content[0].text.strip()
+        try:
+            scores = json.loads(response_text)
+        except json.JSONDecodeError:
+            import re
+            json_match = re.search(r'\[[\s\S]*\]', response_text)
+            if json_match:
+                scores = json.loads(json_match.group())
+            else:
+                raise HTTPException(status_code=500, detail="Failed to parse assessment response")
+
+        total = sum(s.get("score", 0) for s in scores)
+        count = len(scores) or 1
+        overall = round(total / count, 3)
+
+        return JSONResponse({
+            "prompt": prompt.strip(),
+            "checklist": checklist_items,
+            "scores": scores,
+            "overall_score": overall,
+        })
+
+    except anthropic.APIError as e:
+        raise HTTPException(status_code=502, detail=f"Anthropic API error: {str(e)}")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Assessment failed: {str(e)}")
 
 
 PAGE_HTML = """<!DOCTYPE html>
