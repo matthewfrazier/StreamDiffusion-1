@@ -475,6 +475,90 @@ async def delete_scene(scene_key: str = Path(...)):
     return JSONResponse({"status": "deleted", "key": scene_key})
 
 
+class GenerateSceneRequest(BaseModel):
+    context: str = Field(..., min_length=1, max_length=5000)
+    key: Optional[str] = None
+    save: bool = False
+
+
+GENERATE_SCENE_SYSTEM = """\
+You are an expert at designing creative preset libraries for AI generation tools.
+Given freeform context (playlist names, track titles, text descriptions, mood boards, etc.),
+produce a structured scene definition with categorized presets.
+
+Rules:
+- Create 3-5 categories that organize the creative space (e.g., Genre, Mood, Texture, Tempo, Instrumentation).
+- Each category should have 4-8 presets.
+- Each preset has a short human-readable "label" (1-3 words) and a "value" (comma-separated generation tokens, 3-10 tokens).
+- Labels must be unique across ALL categories.
+- Also produce a "label" for the scene itself (2-5 words, title case).
+- Also produce a "key" — a lowercase kebab-case slug (2-50 chars, letters/digits/hyphens only).
+- Return ONLY valid JSON with keys: "key", "label", "categories"
+- categories is an array of {"name": "...", "presets": [{"label": "...", "value": "..."}]}
+- Do NOT wrap in markdown code fences. Return raw JSON only.
+"""
+
+
+@app.post("/scenes/generate")
+async def generate_scene(req: GenerateSceneRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY environment variable is not set")
+
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(status_code=500, detail="anthropic package is not installed. Run: uv pip install anthropic")
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2048,
+            system=GENERATE_SCENE_SYSTEM,
+            messages=[{"role": "user", "content": f"Build a scene preset library from this context:\n\n{req.context.strip()}"}],
+        )
+
+        response_text = message.content[0].text.strip()
+
+        try:
+            result = json.loads(response_text)
+        except json.JSONDecodeError:
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                raise HTTPException(status_code=500, detail="Failed to parse scene generation response as JSON")
+
+        scene_key = req.key or result.get("key", "custom-scene")
+        if not SCENE_KEY_RE.match(scene_key):
+            scene_key = "custom-scene"
+        scene_label = result.get("label", "Custom Scene")
+        categories = result.get("categories", [])
+
+        if not categories:
+            raise HTTPException(status_code=500, detail="LLM returned no categories")
+
+        scene_def = {"label": scene_label, "categories": categories}
+
+        if req.save:
+            SCENE_PRESETS[scene_key] = scene_def
+
+        return JSONResponse({
+            "key": scene_key,
+            "saved": req.save,
+            **scene_def,
+        }, status_code=201)
+
+    except anthropic.APIError as e:
+        raise HTTPException(status_code=502, detail=f"Anthropic API error: {str(e)}")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"Scene generation failed: {str(e)}")
+
+
 class LoadModelRequest(BaseModel):
     model: str
     controlnet: Optional[str] = None

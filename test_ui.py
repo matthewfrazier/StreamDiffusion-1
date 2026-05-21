@@ -1213,3 +1213,79 @@ class TestSceneCRUD:
         assert "enhanced_prompt" in data
         assert "suggested_chips" in data
         requests.delete(f"{BASE_URL}/scenes/test-enh", timeout=10)
+
+
+class TestSceneGenerate:
+    """Tests for POST /scenes/generate — LLM-powered scene creation from context."""
+
+    def test_generate_returns_scene_structure(self):
+        resp = requests.post(
+            f"{BASE_URL}/scenes/generate",
+            json={"context": "lo-fi hip hop study beats: jazzy piano, vinyl crackle, rainy day vibes"},
+            timeout=30,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert "key" in data
+        assert "label" in data
+        assert "categories" in data
+        assert len(data["categories"]) >= 2
+        for cat in data["categories"]:
+            assert "name" in cat
+            assert "presets" in cat
+            assert len(cat["presets"]) >= 1
+            for p in cat["presets"]:
+                assert "label" in p
+                assert "value" in p
+        assert data["saved"] is False
+
+    def test_generate_with_save_registers_scene(self):
+        resp = requests.post(
+            f"{BASE_URL}/scenes/generate",
+            json={"context": "dark ambient horror soundscapes for survival games", "key": "test-horror", "save": True},
+            timeout=30,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["key"] == "test-horror"
+        assert data["saved"] is True
+        # Verify it's now accessible via /presets
+        presets_resp = requests.get(f"{BASE_URL}/presets?scene=test-horror", timeout=10)
+        assert presets_resp.status_code == 200
+        presets_data = presets_resp.json()
+        assert "label" in presets_data
+        assert "categories" in presets_data
+        # Cleanup
+        requests.delete(f"{BASE_URL}/scenes/test-horror", timeout=10)
+
+    def test_generate_with_key_override(self):
+        resp = requests.post(
+            f"{BASE_URL}/scenes/generate",
+            json={"context": "epic orchestral battle music for RPG boss fights", "key": "test-epic"},
+            timeout=30,
+        )
+        assert resp.status_code == 201
+        assert resp.json()["key"] == "test-epic"
+
+    def test_generate_empty_context_rejected(self):
+        resp = requests.post(
+            f"{BASE_URL}/scenes/generate",
+            json={"context": ""},
+            timeout=10,
+        )
+        assert resp.status_code == 422
+
+    def test_generate_from_playlist_titles(self):
+        resp = requests.post(
+            f"{BASE_URL}/scenes/generate",
+            json={
+                "context": "Playlist titles: 'Midnight Jazz Café', 'Sunday Morning Acoustics', "
+                "'Driving Through Neon Cities', 'Forest Meditation', 'Retro Synthwave Dreams'"
+            },
+            timeout=30,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert len(data["categories"]) >= 2
+        all_labels = [p["label"] for cat in data["categories"] for p in cat["presets"]]
+        assert len(all_labels) == len(set(all_labels)), "Preset labels should be unique"

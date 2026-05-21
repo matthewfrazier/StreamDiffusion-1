@@ -167,6 +167,55 @@ Delete a custom scene. Built-in scenes (image, music, sound) can also be deleted
 
 Returns `404` if not found.
 
+#### POST /scenes/generate
+Generate a complete scene definition from freeform context using LLM. Accepts text descriptions, playlist names, track titles, mood boards — any creative context that describes a domain.
+
+**Request:**
+```json
+{
+  "context": "Lo-fi hip hop study beats: jazzy piano chords, vinyl crackle, mellow drums, rainy day vibes, late night coding sessions, coffee shop atmosphere",
+  "key": "lofi-study",
+  "save": true
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `context` | string | yes | Freeform text (1-5000 chars): descriptions, titles, track lists, mood keywords |
+| `key` | string | no | Override the LLM-suggested scene key |
+| `save` | bool | no | If `true`, immediately register the scene (available via `/presets`, `/enhance`, embed widget) |
+
+**Response:** `201`
+```json
+{
+  "key": "lofi-study",
+  "saved": true,
+  "label": "Lo-Fi Study Beats",
+  "categories": [
+    {
+      "name": "Vibe",
+      "presets": [
+        {"label": "Rainy Day", "value": "rain ambience, gentle patter, cozy, introspective"},
+        {"label": "Late Night", "value": "nocturnal, dim, quiet intensity, solitary focus"},
+        {"label": "Coffee Shop", "value": "warm, murmur, espresso machine, ambient chatter"}
+      ]
+    },
+    {
+      "name": "Instrumentation",
+      "presets": [
+        {"label": "Jazzy Keys", "value": "rhodes piano, jazz chords, seventh chords, mellow keys"},
+        {"label": "Vinyl Texture", "value": "vinyl crackle, tape hiss, analog warmth, lo-fi noise"}
+      ]
+    },
+    ...
+  ]
+}
+```
+
+The LLM produces 3-5 categories with 4-8 presets each. When `save: false` (default), the response is a preview — the client can inspect, modify, and then `PUT /scenes/{key}` to register it.
+
+Returns `400` for empty context, `500` if `ANTHROPIC_API_KEY` is not set.
+
 ### POST /enhance
 Rewrite a prompt using LLM enhancement, optimized per scene. Returns suggested preset chips.
 
