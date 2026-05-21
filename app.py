@@ -900,8 +900,6 @@ body{font-family:var(--sl-font-sans);background:var(--sl-color-neutral-0);color:
 @media(max-width:768px){.layout{grid-template-columns:minmax(0,1fr);gap:12px}body{padding:8px}.sidebar{order:2;min-width:0}.main{order:1;min-width:0}.result{min-height:unset}}
 .sidebar{display:flex;flex-direction:column;gap:12px}
 .main{display:flex;flex-direction:column;gap:12px}
-.prompt-row{display:flex;gap:8px;align-items:flex-end}
-.prompt-row sl-textarea{flex:1}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{touch-action:manipulation;-webkit-tap-highlight-color:transparent;border:1px solid var(--sl-color-neutral-300);background:var(--sl-color-neutral-0);color:var(--sl-color-neutral-700);padding:4px 14px;border-radius:9999px;font:inherit;font-size:var(--sl-font-size-small);cursor:pointer;user-select:none;transition:background .15s,color .15s,border-color .15s}
 .chip[data-active="true"]{background:var(--sl-color-primary-600);color:#fff;border-color:var(--sl-color-primary-600)}
@@ -986,13 +984,11 @@ sl-details::part(content){padding:8px 12px}
       <div class="active-pills" id="activePills"></div>
       <div class="autocomplete-wrap">
         <div class="autocomplete-list" id="acList"></div>
-        <div class="prompt-row">
-          <sl-textarea id="prompt" rows="2" value="a beautiful landscape, mountains, sunset" resize="auto" placeholder="Describe your image... type # for presets"></sl-textarea>
-          <div style="display:flex;flex-direction:column;gap:4px">
-            <sl-button variant="primary" size="large" id="genBtn">Generate</sl-button>
-            <sl-button size="small" variant="success" id="enhanceBtn">Enhance</sl-button>
-            <sl-button size="small" variant="text" id="savePromptBtn">Save</sl-button>
-          </div>
+        <sl-textarea id="prompt" rows="2" value="a beautiful landscape, mountains, sunset" resize="auto" placeholder="Describe your image... type # for presets"></sl-textarea>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <sl-button variant="primary" size="small" id="genBtn" style="flex:1">Generate</sl-button>
+          <sl-button size="small" variant="success" id="enhanceBtn" style="flex:1">Enhance</sl-button>
+          <sl-button size="small" variant="text" id="savePromptBtn">Save</sl-button>
         </div>
       </div>
       <div id="enhanceNotes" class="muted" style="display:none;margin-top:4px;padding:2px 4px;font-style:italic"></div>
