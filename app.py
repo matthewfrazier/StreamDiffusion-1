@@ -897,7 +897,7 @@ PAGE_HTML = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--sl-font-sans);background:var(--sl-color-neutral-0);color:var(--sl-color-neutral-900);min-height:100vh;padding:16px}
 .layout{display:grid;grid-template-columns:260px 1fr;gap:16px;max-width:1100px;margin:0 auto}
-@media(max-width:768px){.layout{grid-template-columns:1fr}body{padding:8px}.sidebar{order:2}.main{order:1}.result{min-height:unset}}
+@media(max-width:768px){.layout{grid-template-columns:minmax(0,1fr);gap:12px}body{padding:8px}.sidebar{order:2;min-width:0}.main{order:1;min-width:0}.result{min-height:unset}}
 .sidebar{display:flex;flex-direction:column;gap:12px}
 .main{display:flex;flex-direction:column;gap:12px}
 .prompt-row{display:flex;gap:8px;align-items:flex-end}
