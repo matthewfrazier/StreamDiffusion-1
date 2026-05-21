@@ -1114,6 +1114,21 @@ sl-details::part(content){padding:8px 12px}
 .source-list{display:flex;flex-direction:column;gap:0}
 .sidebar-heading{font-size:var(--sl-font-size-small);font-weight:600;color:var(--sl-color-neutral-500);text-transform:uppercase;letter-spacing:0.05em;padding:4px 0}
 .muted{font-size:var(--sl-font-size-small);color:var(--sl-color-neutral-500)}
+.assess-table{width:100%;border-collapse:collapse;font-size:var(--sl-font-size-small)}
+.assess-table th{text-align:left;padding:4px 8px;border-bottom:2px solid var(--sl-color-neutral-200);color:var(--sl-color-neutral-500);font-weight:600}
+.assess-table td{padding:4px 8px;border-bottom:1px solid var(--sl-color-neutral-100)}
+.assess-table .score-cell{font-family:var(--sl-font-mono);text-align:right;min-width:50px}
+.score-bar{height:6px;border-radius:3px;background:var(--sl-color-neutral-200);overflow:hidden;min-width:40px}
+.score-bar-fill{height:100%;border-radius:3px;transition:width .3s}
+.score-low{background:var(--sl-color-danger-500)}
+.score-mid{background:var(--sl-color-warning-500)}
+.score-high{background:var(--sl-color-success-500)}
+.hg{display:grid;gap:0;font-size:var(--sl-font-size-x-small);overflow-x:auto}
+.hg-header{font-weight:600;padding:4px 6px;background:var(--sl-color-neutral-50);border-bottom:2px solid var(--sl-color-neutral-200);color:var(--sl-color-neutral-500)}
+.hg-cell{padding:4px 6px;border-bottom:1px solid var(--sl-color-neutral-100);font-family:var(--sl-font-mono);text-align:center}
+.hg-label{padding:4px 6px;border-bottom:1px solid var(--sl-color-neutral-100);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hg-overall{font-weight:700;background:var(--sl-color-neutral-50)}
+@media(max-width:768px){.hg{font-size:var(--sl-font-size-2x-small)}}
 </style>
 </head>
 <body>
@@ -1163,6 +1178,7 @@ sl-details::part(content){padding:8px 12px}
         <div style="display:flex;gap:6px;margin-top:6px">
           <sl-button variant="primary" size="small" id="genBtn" style="flex:1">Generate</sl-button>
           <sl-button size="small" variant="success" id="enhanceBtn" style="flex:1">Enhance</sl-button>
+          <sl-button size="small" variant="warning" id="autoEnhanceBtn" style="flex:1">Auto</sl-button>
           <sl-button size="small" variant="text" id="savePromptBtn">Save</sl-button>
         </div>
       </div>
@@ -1260,6 +1276,23 @@ sl-details::part(content){padding:8px 12px}
       <sl-input id="shareUrl" readonly size="small" style="flex:1"></sl-input>
       <sl-button size="small" id="copyBtn">Copy URL</sl-button>
     </div>
+
+    <sl-card id="assessPanel" style="display:none">
+      <div slot="header" style="display:flex;justify-content:space-between;align-items:center">
+        <strong>Assessment</strong>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="autoStepLabel" class="muted" style="display:none"><sl-spinner style="font-size:.8rem;vertical-align:middle"></sl-spinner> <span id="autoStepText">Working...</span></span>
+          <sl-badge id="overallScoreBadge" variant="neutral" pill>--</sl-badge>
+        </div>
+      </div>
+      <table class="assess-table" id="assessTable">
+        <thead><tr><th>Concept</th><th>Score</th><th>Verdict</th></tr></thead>
+        <tbody id="assessBody"></tbody>
+      </table>
+      <sl-details summary="Run History" id="historyDetails" style="margin-top:8px">
+        <div id="historyGrid" class="hg"></div>
+      </sl-details>
+    </sl-card>
 
   </div>
 </div>
@@ -1483,7 +1516,7 @@ async function generate() {
 
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
-    img.onload = () => URL.revokeObjectURL(img._prev);
+    if (img._prev) URL.revokeObjectURL(img._prev);
     img._prev = url;
     img.src = url;
     img.style.display = 'block';
@@ -1897,6 +1930,152 @@ document.getElementById('enhanceBtn').addEventListener('click', async () => {
     showError(e.message);
   } finally {
     btn.loading = false;
+  }
+});
+
+// --- Auto Enhance ---
+const autoEnhanceHistory = [];
+
+function scoreClass(v) {
+  if (v < 0.4) return 'score-low';
+  if (v < 0.7) return 'score-mid';
+  return 'score-high';
+}
+
+function renderChecklistScores(scores, overall) {
+  const tbody = document.getElementById('assessBody');
+  tbody.innerHTML = scores.map(s => {
+    const cls = scoreClass(s.score);
+    const pct = Math.round(s.score * 100);
+    return `<tr>
+      <td>${s.concept}</td>
+      <td class="score-cell">
+        <div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">
+          <div class="score-bar" style="flex:1;max-width:60px"><div class="score-bar-fill ${cls}" style="width:${pct}%"></div></div>
+          <span>${s.score.toFixed(1)}</span>
+        </div>
+      </td>
+      <td class="muted">${s.verdict}</td>
+    </tr>`;
+  }).join('');
+  const badge = document.getElementById('overallScoreBadge');
+  badge.textContent = overall.toFixed(2);
+  badge.variant = overall >= 0.7 ? 'success' : overall >= 0.4 ? 'warning' : 'danger';
+}
+
+function renderHistoryGrid() {
+  const grid = document.getElementById('historyGrid');
+  if (!autoEnhanceHistory.length) { grid.innerHTML = ''; return; }
+  const allConcepts = [];
+  const seen = new Set();
+  for (const run of autoEnhanceHistory) {
+    for (const s of run.scores) {
+      if (!seen.has(s.concept)) { seen.add(s.concept); allConcepts.push(s.concept); }
+    }
+  }
+  const cols = autoEnhanceHistory.length;
+  grid.style.gridTemplateColumns = `minmax(120px,1fr) repeat(${cols}, minmax(50px,80px))`;
+  let html = '<div class="hg-header hg-label">Concept</div>';
+  for (let i = 0; i < cols; i++) html += `<div class="hg-header hg-cell">#${i + 1}</div>`;
+  for (const concept of allConcepts) {
+    html += `<div class="hg-label" title="${concept}">${concept}</div>`;
+    for (const run of autoEnhanceHistory) {
+      const match = run.scores.find(s => s.concept === concept);
+      const score = match ? match.score : null;
+      const cls = score !== null ? scoreClass(score) : '';
+      const style = score !== null ? `color:var(--sl-color-${score >= 0.7 ? 'success' : score >= 0.4 ? 'warning' : 'danger'}-700)` : '';
+      html += `<div class="hg-cell" title="${match?.verdict || ''}" style="${style}">${score !== null ? score.toFixed(1) : '—'}</div>`;
+    }
+  }
+  html += '<div class="hg-label hg-overall">Overall</div>';
+  for (const run of autoEnhanceHistory) {
+    const style = `color:var(--sl-color-${run.overallScore >= 0.7 ? 'success' : run.overallScore >= 0.4 ? 'warning' : 'danger'}-700)`;
+    html += `<div class="hg-cell hg-overall" style="${style}">${run.overallScore.toFixed(2)}</div>`;
+  }
+  grid.innerHTML = html;
+}
+
+function setAutoStep(text) {
+  const label = document.getElementById('autoStepLabel');
+  const textEl = document.getElementById('autoStepText');
+  label.style.display = text ? '' : 'none';
+  if (text) textEl.textContent = text;
+}
+
+document.getElementById('autoEnhanceBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('autoEnhanceBtn');
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) return;
+
+  btn.loading = true;
+  document.getElementById('genBtn').disabled = true;
+  document.getElementById('enhanceBtn').disabled = true;
+  document.getElementById('assessPanel').style.display = '';
+
+  try {
+    setAutoStep('Enhancing prompt...');
+    const enhBody = { prompt, scene: currentScene };
+    const ctx = getContext();
+    if (ctx) enhBody.context = ctx;
+    const enhResp = await fetch('/enhance', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(enhBody)
+    });
+    if (!enhResp.ok) throw new Error('Enhancement failed');
+    const enhData = await enhResp.json();
+    document.getElementById('prompt').value = enhData.enhanced_prompt;
+    if (enhData.negative_prompt) document.getElementById('negPrompt').value = enhData.negative_prompt;
+    if (enhData.suggested_chips?.length) {
+      enhData.suggested_chips.forEach(l => activateChipByLabel(l));
+      syncPills();
+    }
+    if (enhData.notes) {
+      const n = document.getElementById('enhanceNotes');
+      n.textContent = enhData.notes;
+      n.style.display = '';
+    }
+
+    setAutoStep('Generating image...');
+    await generate();
+
+    const fullPrompt = buildFullPrompt();
+
+    setAutoStep('Extracting concepts...');
+    const clResp = await fetch('/assess/checklist', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ prompt: fullPrompt })
+    });
+    if (!clResp.ok) throw new Error('Checklist extraction failed');
+    const checklist = (await clResp.json()).checklist;
+
+    setAutoStep('Assessing image...');
+    const imgBlob = await (await fetch(document.getElementById('resultImg').src)).blob();
+    const fd = new FormData();
+    fd.append('file', imgBlob, 'generated.png');
+    fd.append('prompt', fullPrompt);
+    fd.append('checklist', JSON.stringify(checklist));
+    const assessResp = await fetch('/assess', { method: 'POST', body: fd });
+    if (!assessResp.ok) throw new Error('Assessment failed');
+    const assessData = await assessResp.json();
+
+    autoEnhanceHistory.push({
+      runIndex: autoEnhanceHistory.length + 1,
+      prompt: fullPrompt,
+      checklist,
+      scores: assessData.scores,
+      overallScore: assessData.overall_score,
+    });
+
+    renderChecklistScores(assessData.scores, assessData.overall_score);
+    renderHistoryGrid();
+    setAutoStep(null);
+
+  } catch (e) {
+    showError('Auto Enhance: ' + e.message);
+    setAutoStep(null);
+  } finally {
+    btn.loading = false;
+    document.getElementById('genBtn').disabled = false;
+    document.getElementById('enhanceBtn').disabled = false;
   }
 });
 
